@@ -101,8 +101,13 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             from pianoplayer.vkeyboard import VirtualKeyboard
             from pianoplayer.utils import score_tempo
 
-            vk = VirtualKeyboard(songname=os.path.basename(str(self.filename)),
-                                 tempo=score_tempo(self.sf))
+            if self.rh is None and self.lh is None:
+                print('Load a score and press GENERATE first.')
+                return
+
+            vk = VirtualKeyboard(
+                songname=os.path.basename(str(getattr(self, 'filename', ''))),
+                tempo=score_tempo(getattr(self, 'sf', None)))
             if self.Rcb.get() and self.rh is not None:
                 vk.build_RH(self.rh)
             if self.Lcb.get() and self.lh is not None:
