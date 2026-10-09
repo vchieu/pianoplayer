@@ -78,6 +78,12 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             print('Input File is ', self.filename)
 
         def generateCMD(self):
+            if not self.filename or not os.path.isfile(self.filename):
+                print('Cannot find', self.filename, '- please choose a score.')
+                self.importCMD()
+                if not self.filename or not os.path.isfile(self.filename):
+                    print('No score selected.')
+                    return
             sf = converter.parse(self.filename)
             self.sf = sf
             self.rh = None

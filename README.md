@@ -35,7 +35,8 @@ files.
 
 **Windows 10** users can place this file:
 [pianoplayer.bat](https://github.com/marcomusy/pianoplayer/blob/master/pianoplayer.bat)
-on their desktop (edit the path to your local anaconda or python installation).
+on their desktop and double click it: it finds Python and PianoPlayer by
+itself, there is nothing to edit.
 Check out [this link](https://github.com/marcomusy/pianoplayer/issues/27) in case of
 installation problems.
 
