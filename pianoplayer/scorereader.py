@@ -5,6 +5,14 @@ Created on Thu Nov 26 19:22:20 2015
 """
 from pianoplayer.utils import keypos
 
+
+def _flat(stream):
+    """music21>=7 removed Stream.flat in favour of Stream.flatten()."""
+    if hasattr(stream, "flatten"):
+        return stream.flatten()
+    return stream.flat
+
+
 #####################################################
 class INote:
     def __init__(self):
@@ -32,7 +40,7 @@ def reader(sf, beam=0):
     if hasattr(sf, 'parts'):
         if len(sf.parts) <= beam:
             return []
-        strm = sf.parts[beam].flat
+        strm = _flat(sf.parts[beam])
     elif hasattr(sf, 'elements'):
         if len(sf.elements)==1 and beam==1:
             strm = sf[0]
@@ -41,7 +49,7 @@ def reader(sf, beam=0):
                 return []
             strm = sf[beam]
     else:
-        strm = sf.flat
+        strm = _flat(sf)
 
     print('Reading beam', beam, 'with', len(strm), 'objects in stream.')
 

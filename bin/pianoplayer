@@ -32,6 +32,9 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             self.Lcb = BooleanVar()
             self.RightHandBeam = 0
             self.LeftHandBeam  = 1
+            self.sf = None
+            self.rh = None
+            self.lh = None
             self.initUI()
 
         def initUI(self):
@@ -76,6 +79,9 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
 
         def generateCMD(self):
             sf = converter.parse(self.filename)
+            self.sf = sf
+            self.rh = None
+            self.lh = None
 
             if self.Rcb.get():
                 self.rh = Hand("right", self.handsize.get())
@@ -93,15 +99,17 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
 
         def vpCMD(self):
             from pianoplayer.vkeyboard import VirtualKeyboard
+            from pianoplayer.utils import score_tempo
 
-            vk = VirtualKeyboard()
-            if self.Rcb.get(): vk.build_RH(self.rh)
-            if self.Lcb.get(): vk.build_LH(self.lh)
+            vk = VirtualKeyboard(songname=os.path.basename(str(self.filename)),
+                                 tempo=score_tempo(self.sf))
+            if self.Rcb.get() and self.rh is not None:
+                vk.build_RH(self.rh)
+            if self.Lcb.get() and self.lh is not None:
+                vk.build_LH(self.lh)
             vk.playsounds = 1
-            vk.play()
-
-            vk.vp.show(zoom=2, interactive=1)
-            print('Close window and press Close to exit.')
+            vk.play()          # blocks until the window is closed
+            print('Thanks for playing PianoPlayer!')
 
         def musescoreCMD(self):
             print('try opening musescore')
@@ -216,12 +224,13 @@ else: ##########################################################################
 
     if args.with_vedo:
         from pianoplayer.vkeyboard import VirtualKeyboard
+        from pianoplayer.utils import score_tempo
 
         if args.start_measure !=1:
             print('Sorry, start_measure must be set to 1 when -v option is used. Exit.')
             exit()
 
-        vk = VirtualKeyboard(songname=xmlfn)
+        vk = VirtualKeyboard(songname=xmlfn, tempo=score_tempo(sf))
 
         if not args.left_only:
             vk.build_RH(rh)
@@ -232,5 +241,4 @@ else: ##########################################################################
             vk.playsounds = False
 
         vk.speedfactor = args.vedo_speed
-        vk.play()
-        vk.vp.show(zoom=2, interactive=1)
+        vk.play()   # renders + plays, blocks until the window is closed

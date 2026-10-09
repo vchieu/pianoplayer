@@ -183,6 +183,9 @@ class Hand:
         if self.depth < 3: self.depth = 3
         if self.depth > 9: self.depth = 9
 
+        self.fingerseq = []        # fingertip fan of every processed note ..
+        self.fingerseq_index = []  # .. and the noteseq index it belongs to
+
         for i in range(N):##############
 
             an = self.noteseq[i]
@@ -195,17 +198,20 @@ class Hand:
                 self.depth = 9
 
             best_finger = 0
+            ninenotes = self.noteseq[i : i+9]
             if i > N-10:
                 if len(out)>1: best_finger = out.pop(1)
             else:
-                ninenotes = self.noteseq[i : i+9]
                 out, vel  = self.optimize_seq(ninenotes, start_finger)
                 best_finger  = out[0]
                 start_finger = out[1]
 
             an.fingering = best_finger
-            self.set_fingers_positions(out, ninenotes, 0)
+            outfan = list(out)
+            if outfan: outfan[0] = best_finger
+            self.set_fingers_positions(outfan, ninenotes, 0)
             self.fingerseq.append(list(self.cfps))
+            self.fingerseq_index.append(i)
 
             if best_finger>0 and i < N-3:
                 fng = Fingering(best_finger)

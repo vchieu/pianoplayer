@@ -5,7 +5,8 @@ setup(
     version='2.2.0', #change also in __init__.py
     packages=['pianoplayer'],
     scripts=['bin/pianoplayer'],
-    install_requires=['music21','vedo'],
+    install_requires=['music21', 'vedo', 'numpy', 'miniaudio'],
+    python_requires='>=3.9',
     description='Automatic piano fingering generator. Finds and shows in 3D the best fingering combination to play a score.',
     long_description="""Automatic piano fingering generator.
     Finds and shows in a 3D visualization the best fingering combination to play a score.
@@ -45,7 +46,6 @@ setup(
 
 ##############################################################
 #to do:
-#- check sound option (pygame in https://github.com/Zulko/pianoputer/blob/master/pianoputer.py)
 #- scan all dataset and drop pdfs
 #- color each finger note
 #- notebook example?

@@ -1,4 +1,14 @@
 *.[oa]
 *~
 *.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
 output.xml
+
+# rendered test artefacts
+test_audio_out/
+test_hand_render/
+test_play_out/
+test_shadow_out.png

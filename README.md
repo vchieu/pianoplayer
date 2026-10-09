@@ -14,11 +14,12 @@ Optionally visualize it in 3D with [vedo](https://github.com/marcomusy/vedo).<br
 ```bash
 pip install pianoplayer
 ```
-to enable sound you may need to:
-```bash
-sudo apt install libasound2-dev
-pip install simpleaudio
-```
+The 3D player comes with a built-in piano synthesiser: notes are rendered
+on the fly by additive synthesis, so there are **no sound samples to download**
+and chords are played in tempo. If no audio device is available the
+animation simply runs silent.
+
+Requirements: `music21`, `vedo` (+`vtk`), `numpy` and `miniaudio`.
 
 #### Installing without 3D rendering
 To only install the core functionality and skip everything else, use the following:
@@ -45,6 +46,11 @@ Example command line from terminal:<br />
 will find the right hand fingering for the first 10 measures,
 pop up a 3D rendering window and invoke *musescore*.
 
+Add `-v` to watch & listen to the result: the 3D player animates both hands
+on the keyboard and plays the score with the built-in synthesiser, at the
+tempo written in the score. Use `--vedo-speed 1.5` to play it faster and
+`-z` to mute it. The window stays open until you close it.
+
 The output is saved as a [MusicXML](https://en.wikipedia.org/wiki/MusicXML)
 file with name `output.xml`.<br />
 
@@ -67,7 +73,8 @@ pianoplayer [-h] [-o] [-n] [-s] [-d] [-k] [-rbeam] [-lbeam] [-q] [-m] [-v] [--ve
 #   --quiet               Switch off verbosity
 #   -m, --musescore       Open output in musescore after processing
 #   -b, --below-beam      Show fingering numbers below beam line
-#   -v, --with-vedo       Play 3D scene after processing
+#   -v, --with-vedo       Play the 3D scene with sound after processing
+#   --vedo-speed          [1.5] Playback speed factor (animation and sound)
 #   -z, --sound-off       Disable sound
 #   -l, --left-only       Fingering for left hand only
 #   -r, --right-only      Fingering for right hand only
@@ -105,6 +112,24 @@ then:
 ![pianoplayer3d](https://user-images.githubusercontent.com/32848391/63605322-0176ab80-c5ce-11e9-8213-b572d0303523.gif)
 
 
+## The 3D Player:
+Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
+
+- **procedural hands**: palms, joints, finger pads and nails are built from
+  primitives and re-posed every frame by a small analytic IK solver, so the
+  fingers arch and flex like real ones and the thumb reaches the black keys;
+- **keys dip** on their hinge when a finger presses them, and flash with an
+  orange (right hand) or violet (left hand) accent;
+- **tempo comes from the score**: every note - including chords - sounds at
+  its exact onset time; `--vedo-speed` scales both animation and sound;
+- **HUD** (bottom left) shows elapsed/total time, current measure and tempo,
+  plus a progress strip on the fallboard;
+- the built-in synthesiser renders a full polyphonic piano with no samples,
+  panning each hand slightly to its side of the stage;
+- drag with the mouse to orbit, `Middle`/`Right` buttons to pan and zoom;
+  close the window to end the playback.
+
+
 ## How the algorithm works:
 The algorithm minimizes the fingers speed needed to play a sequence of notes or chords by searching
 through feasible combinations of fingerings.
@@ -130,8 +155,6 @@ default the algorithm selects this number automatically based on the duration of
 ## Limitations
 - Some specific fingering combinations, considered too unlikely in the first place, are excluded from the search (e.g. the 3rd finger crossing the 4th).
 - Hands are always assumed independent from each other.
-- In the 3D representation with sounds enabled, notes are played one after the other (no chords),
-so the tempo within the measure is not always respected.
 - Small notes/ornaments are ignored.
 
 
