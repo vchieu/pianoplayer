@@ -53,12 +53,19 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     vk.build_LH(lh)
 
     stats = {"on": 0, "off": 0}
+    sched_err = []          # (note score time) - (frame time) for every note_on
+    clock = {"t": -0.5}
     vk._prepare()
     if vk.engine is not None:
         raw_on, raw_off = vk.engine.note_on, vk.engine.note_off
 
         def on(*a, **k):
             stats["on"] += 1
+            w = k.get("when")
+            if w is not None:
+                # the engine works on its own absolute clock: translate the
+                # scheduled time back to score time and compare with the frame
+                sched_err.append((w + vk._audio_epoch) - clock["t"])
             return raw_on(*a, **k)
 
         def off(*a, **k):
@@ -76,6 +83,7 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     keys_down = set()
     rig_moves = []
     while t < seconds:
+        clock["t"] = t
         vk._frame(t, dt)
         vk.vp.render()
         pressed_peak = max(pressed_peak,
@@ -105,6 +113,14 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     print("HUD sample:", vk._hud.text() if vk._hud else "(none)")
 
     ok = True
+    if sched_err:
+        lo, hi = min(sched_err), max(sched_err)
+        print("note_on lead time: %.3f .. %.3f s" % (lo, hi))
+        if lo < -0.05 or hi > 0.33:
+            print("FAIL: audio events are not aligned with the animation")
+            ok = False
+    elif rh.noteseq:
+        print("FAIL: no note carried a scheduling time"); ok = False
     if stats["on"] < 5:
         print("FAIL: not enough audio events scheduled"); ok = False
     if pressed_peak < 1 and len(rh.noteseq):

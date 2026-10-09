@@ -52,11 +52,11 @@ except Exception:  # pragma: no cover - optional dependency
 
 SAMPLE_RATE = 44100
 
-_N_PARTIALS = 12       # partials used by each string
-_BEAT_PARTIALS = 4     # low partials played by 2 mistuned strings
+_MAX_PARTIALS = 40     # hard cap of partials used by each note
+_BEAT_PARTIALS = 2     # lowest partials played by 2 mistuned strings
 _DETUNE = 0.00016      # ~0.3 cent, gives the natural "chorus" of a piano
 _STRIKE_POS = 0.115    # hammer position along the string (0..1)
-_TAU_REL = 0.075       # nominal damper time [s]
+_TAU_REL = 0.085       # nominal damper time [s]
 _LN1000 = math.log(1000.0)
 
 
@@ -99,38 +99,41 @@ def _note_params(midi: int) -> dict:
         return cached
 
     f0 = frequency(midi)
-    n = np.arange(1, _N_PARTIALS + 1, dtype=float)
 
     # string inharmonicity: higher (stiffer) strings are more inharmonic
     pos = (midi - 21) / 87.0
-    B = 0.00012 + 0.00110 * pos * pos
+    B = 0.00010 + 0.00095 * pos ** 1.6
+
+    # enough partials to reach ~9 kHz (never more than the cap, so that a
+    # bass note does not cost 150 oscillators)
+    nmax = int(np.clip(9000.0 / max(f0, 20.0), 10, _MAX_PARTIALS))
+    n = np.arange(1, nmax + 1, dtype=float)
     f = f0 * n * np.sqrt(1.0 + B * n * n)
 
-    # energy of each partial (the spectral tilt is applied per note)
-    amp = np.abs(np.sin(np.pi * n * _STRIKE_POS)) / np.power(n, 1.6)
+    # the hammer does not strike the string at its end -> comb filter,
+    # on top of the 1/n^1.5 spectral tilt of a struck string
+    amp = np.abs(np.sin(np.pi * n * _STRIKE_POS)) / np.power(n, 1.5)
 
-    # whole note decay and partial dependent decay
-    t60 = float(np.clip(9.0 * math.sqrt(440.0 / max(f0, 20.0)), 0.9, 18.0))
-    t60n = t60 / np.power(n, 0.55)
-    rate = np.full(_N_PARTIALS, _LN1000 / t60)
-    rate_n = _LN1000 / np.maximum(t60n, 0.05)
-
-    # two mistuned strings for the lowest partials -> natural beating
+    # two slightly mistuned strings on the lowest partials -> natural beating
     b = _BEAT_PARTIALS
     freqs = np.concatenate([f[:b] * (1 - _DETUNE), f[:b] * (1 + _DETUNE), f[b:]])
     amps = np.concatenate([amp[:b] * 0.5, amp[:b] * 0.5, amp[b:]])
-    rates = np.concatenate([rate[:b], rate[:b], rate_n[b:]])
     partial_n = np.concatenate([n[:b], n[:b], n[b:]])
-    # the damper stops high partials first
-    rel_rate = _LN1000 / (_TAU_REL * np.power(partial_n, 0.30))
-    n_all = partial_n
+
+    # how long the note rings, and the faster death of the upper partials
+    t60 = float(np.clip(8.0 * math.sqrt(440.0 / max(f0, 20.0)), 1.0, 14.0))
+    t60n = np.maximum(t60 / np.power(partial_n, 0.85), 0.035)
+    rates = _LN1000 / t60n
+
+    # the damper stops the upper partials first
+    rel_rate = _LN1000 / (_TAU_REL * np.power(partial_n, 0.45))
 
     peak = float(np.max(amps))
     if peak > 0:
         amps = amps / peak
 
     params = dict(freqs=freqs, amps=amps, rates=rates, rel_rate=rel_rate,
-                  n_all=n_all, f0=f0, t60=t60)
+                  n_all=partial_n, f0=f0, t60=t60)
     _NOTE_CACHE[midi] = params
     return params
 
@@ -146,25 +149,34 @@ class _Voice:
         self.params = p = _note_params(midi)
         v = float(min(max(velocity, 0.0), 1.0))
 
-        # brighter when hit harder: tilt the spectrum with velocity
-        amps = p["amps"] * np.power(p["n_all"], -0.85 * (1.0 - v))
-        self.amps = amps / (float(np.max(amps)) or 1.0)
+        # brighter when hit harder: one pole roll off above the cut frequency
+        fc = 700.0 + 3500.0 * v ** 1.5
+        amps = p["amps"] / np.sqrt(1.0 + (p["freqs"] / fc) ** 2)
+        # normalise on the sum (not on the peak): the sum of the partials is
+        # what the output level really is, so a note can never blow up
+        self.amps = amps / (float(np.sum(amps)) or 1.0)
 
         self.start_frame = start_frame
         self.rel_frame = None
 
-        self.gain = g = (0.25 + 0.75 * v) ** 1.4 * gain
+        self.gain = (0.18 + 0.82 * v) ** 1.6 * gain
         c = 0.35 * pan
         self.pan_l = math.sqrt(max(0.0, 0.5 * (1.0 - c)))
         self.pan_r = math.sqrt(max(0.0, 0.5 * (1.0 + c)))
 
-        # short smoothed noise burst = hammer felt transient
-        nn = max(64, int(0.045 * sr))
+        # short, dark noise burst = hammer felt transient
+        # (its envelope is baked in, so mixing it is just an addition)
+        nn = max(64, int(0.030 * sr))
         rng = np.random.default_rng((midi * 977 + int(v * 500)) & 0xFFFFFFFF)
         nz = rng.standard_normal(nn)
-        win = np.hanning(9)
-        nz = np.convolve(nz, win / win.sum(), mode="same")
-        self.noise = nz * (0.35 * (0.4 + 0.6 * v))
+        nz = np.convolve(nz, np.ones(10) / 10.0, mode="same")
+        nz = np.convolve(nz, np.ones(10) / 10.0, mode="same")  # soft felt: ~2 kHz
+        ramp = int(0.0015 * sr)
+        if ramp > 1:
+            nz[:ramp] *= np.linspace(0.0, 1.0, ramp)   # no click at onset
+        nz *= np.exp(-np.arange(nn) / (0.010 * sr))
+        thump = min(1.0 + 0.8 * (200.0 / max(p["f0"], 40.0)), 2.0)
+        self.noise = nz * (0.55 * (0.35 + 0.65 * v) * thump)
 
     # ----------------------------------------------------------
     def energy_at(self, frame: int) -> float:
@@ -314,8 +326,7 @@ class SynthCore:
             if i0 < len(v.noise):
                 chunk = v.noise[i0:i0 + length]
                 if len(chunk):
-                    brust = chunk * np.exp(-np.arange(len(chunk)) / (0.012 * sr))
-                    sig[:len(brust)] += brust
+                    sig[:len(chunk)] += chunk
 
             left += sig * v.pan_l
             right += sig * v.pan_r
@@ -330,11 +341,21 @@ class SynthCore:
     # ---------------------------------------------------------- master
     @staticmethod
     def master(mix: np.ndarray, volume: float) -> np.ndarray:
+        """
+        Level control: perfectly transparent below the knee, soft (never
+        clipped, never pumped) above it.
+        """
         if volume != 1.0:
             mix = mix * float(volume)
-        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
-        if peak > 0.985:                      # soft peak limit, never clip
-            mix = mix * (0.985 / peak)
+        if not mix.size:
+            return mix
+        knee = 0.70
+        a = np.abs(mix)
+        over = a > knee
+        if over.any():
+            a[over] = knee + (1.0 - knee) * np.tanh(
+                (a[over] - knee) / (1.0 - knee))
+            mix = np.sign(mix) * a
         return np.clip(mix, -1.0, 1.0)
 
 
@@ -434,8 +455,8 @@ class SoundEngine:
 
         eng = SoundEngine(volume=0.8)
         eng.start()
-        eng.note_on(60, velocity=0.7, when=0.5)   # half a second from now
-        eng.note_off(60, when=1.2)
+        eng.note_on(60, velocity=0.7, when=2.5)   # 2.5 s after the engine start
+        eng.note_off(60, when=3.2)
         ...
         eng.stop()
     """
@@ -502,11 +523,17 @@ class SoundEngine:
         return self.synth.frame / float(self.sample_rate)
 
     def note_on(self, midi, velocity=0.6, when=None, pan=0.0):
+        """
+        Schedule a note.  `when` is an **absolute time on the engine clock**
+        (seconds since start()), not a delay: use `eng.now + dt` to place a
+        note `dt` seconds from now, and `eng.now` for "immediately".
+        """
         if midi is None:
             return
         self.synth.note_on(midi, velocity, when, pan)
 
     def note_off(self, midi, when=None):
+        """Release a note; `when` follows the same rule as in `note_on()`."""
         if midi is None:
             return
         self.synth.note_off(midi, when)

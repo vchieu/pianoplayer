@@ -207,6 +207,7 @@ class VirtualKeyboard:
         self.engagedkeysL = []
 
         self.engine = None
+        self._audio_epoch = -LEAD_IN   # score time of engine time 0
         self._players = {}
         self._hand_shadows = {}
         self._key_black = {}
@@ -517,7 +518,19 @@ class VirtualKeyboard:
                     w = float(weights[fing])
                 except Exception:
                     w = 1.0
-            vel = min(1.0, max(0.25, 0.56 + 0.17 * w))
+
+            # musical dynamics: the melody is louder than the accompaniment,
+            # down beats are accented, the thumb is stronger than the little
+            # finger, plus a small deterministic humanisation.
+            try:
+                beatpos = float(n.time)
+            except Exception:
+                beatpos = 0.0
+            onbeat = 1.0 - min(abs(beatpos - round(beatpos)) * 3.0, 1.0)
+            base = 0.58 if sign > 0 else 0.50
+            human = (((i * 2654435761) % 97) / 97.0) - 0.5
+            vel = base + 0.18 * onbeat + 0.10 * (w - 1.0) + 0.06 * human
+            vel = min(1.0, max(0.20, vel))
 
             fx = None
             row = fan_of.get(i)
@@ -598,6 +611,7 @@ class VirtualKeyboard:
                 rig.settle(p.notes[0].fx, {})
 
         self._stop_audio()
+        engine_wall = _time.time()
         if self.playsounds:
             try:
                 self.engine = SoundEngine(volume=self.volume, enabled=True)
@@ -622,6 +636,10 @@ class VirtualKeyboard:
         self._hud_t = -1e9
         self._ended = False
         self._t0 = _time.time() + LEAD_IN
+        # the synth counts seconds from the engine start while the score
+        # counts them from _t0: keep the offset, so that a note placed at
+        # score time T lands at engine time (T - _audio_epoch).
+        self._audio_epoch = engine_wall - self._t0
         self._last = _time.time()
 
     def _teardown(self):
@@ -680,9 +698,10 @@ class VirtualKeyboard:
             while p.sched < len(notes) and notes[p.sched].t_on - now <= AUDIO_LOOKAHEAD:
                 e = notes[p.sched]
                 if e.midi is not None:
-                    engine.note_on(e.midi, e.vel,
-                                   when=max(0.0, e.t_on - now), pan=p.pan)
-                    engine.note_off(e.midi, when=max(0.0, e.t_off - now))
+                    t_on = max(0.0, e.t_on - self._audio_epoch)
+                    t_off = max(t_on + 0.02, e.t_off - self._audio_epoch)
+                    engine.note_on(e.midi, e.vel, when=t_on, pan=p.pan)
+                    engine.note_off(e.midi, when=t_off)
                 p.sched += 1
         else:
             p.sched = len(notes)
