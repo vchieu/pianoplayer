@@ -30,7 +30,7 @@ build manifest.
 | File | Role |
 |------|------|
 | `bin/pianoplayer` | CLI + Tkinter GUI entry point (installed as the `pianoplayer` script) |
-| `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list; `PIG2Stream()` for PIG `.txt` |
+| `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback); `PIG2Stream()` for PIG `.txt` |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
 | `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`) |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
@@ -47,9 +47,10 @@ and keep the one with the lowest average finger speed.
 **Cost function** (`ave_velocity`): for each consecutive note pair,
 `v = dx / (dt + 0.1)` where `dx` is the distance the finger travels on the
 keyboard (cm) and `dt` is the inter-onset time (s). Black-key notes are
-penalized by dividing `v` by `weights[finger] * bfactor[finger]` (thumb hits
-black keys better than the little finger). The mean over the window is the
-combination's cost; lower is better.
+penalized by dividing `v` by `weights[finger] * bfactor[finger]` -- a
+*lower* `bfactor` means a *stronger* black-key penalty, so the thumb
+(0.3) is penalized most and the middle finger (1.1) least. The mean
+over the window is the combination's cost; lower is better.
 
 **Skip rules** (`optimize_seq.skip`): prune impossible/ugly transitions before
 scoring them -- same finger on two different notes, finger crossings, thumb-to-black
@@ -59,7 +60,14 @@ hard-coded heuristics; changing them changes the character of the output.
 
 **Autodepth**: when `autodepth=True` (default, depth flag `0`), the window depth
 is chosen per position as the smallest `i` in 4..9 whose note reaches > 3.5 s
-ahead. Near the end of the score (< 10 notes left) it falls back to depth 9.
+ahead. Near the end of the score (< 10 notes left) it falls back to depth 9,
+and the last full 9-note window is solved at `i = N-9` so the final note gets
+a finger too. Scores with fewer than 9 notes are padded with dummy copies of
+the last note and solved once.
+
+**Key positions**: `utils.keypos()` computes a note's keyboard x from its
+MIDI number, so enharmonic spellings (B#3 = C4, Cb4 = B3, E#, Fb, ...)
+always land on the physical key that sounds.
 
 **Left hand** is solved by mirroring: `anote.x = -anote.x`, i.e. the left hand
 is treated as a right hand on a mirrored keyboard. All geometry and the
@@ -85,7 +93,10 @@ Hand span (`size` `XXS`..`XXL`) scales `frest` (rest finger positions) by
 - A sample rendered at engine time `t` is *heard* at `t + output_latency`
   (measured from the priming gap, not assumed). The epoch offset
   `engine_wall + latency - _t0` is folded into `note_on(when=...)` so the
-  sound is heard exactly when the finger lands. `AUDIO_LOOKAHEAD` (1.0 s) must
+  sound is heard exactly when the finger lands; it is **re-measured every
+  frame** (the latency only grows, each buffer underrun pads with silence),
+  so notes scheduled after an underrun compensate for the delay.
+  `AUDIO_LOOKAHEAD` (1.0 s) must
   cover device period + mixer + ring cushion + a stalled frame.
 - Env: 4 ms smooth-step attack, exponential decay per partial, fast damper on
   release, hammer felt transient (filtered noise burst baked into the voice).
@@ -108,6 +119,16 @@ outer faces as back-facing and shade them black; the left hand mirrors and
 reverses face winding again for the same reason.
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
+
+**Playback timing** (`_events_for` / `_beat_seconds`): note onsets and
+durations are read from `time_real` / `dur_real` (true quarter lengths,
+ties included) and converted to seconds through `tempo_map`
+(`[(offset_quarters, bpm), ...]`, `utils.score_tempo_map()` honors
+`MetronomeMark.getQuarterBPM()` so referents like ♪=120 or ♩.=60 are
+correct, and tempo changes are integrated piecewise). With no map, the
+constant `tempo` is used. While a finger holds a key, that finger stays
+exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
+the next note.
 
 ## Conventions
 

@@ -24,6 +24,8 @@ class INote:
         self.x        = 0.0
         self.time     = 0.0
         self.duration = 0.0
+        self.time_real = 0.0     # true onset (quarter lengths), for playback
+        self.dur_real  = 0.0     # true duration, for playback
         self.fingering= 0
         self.measure  = 0
         self.chordnr  = 0
@@ -53,64 +55,98 @@ def reader(sf, beam=0):
 
     print('Reading beam', beam, 'with', len(strm), 'objects in stream.')
 
+    sfasam  = 0.05          # small stagger for the fingering algorithm only
     chordID = 0
+    pending = {}            # midi -> INote that opened a tie still running
+    last_off, dup, at_off = None, 0, set()   # elements sharing one onset
+
+    def _absorb(midi, tie, qlen):
+        """True when this note is the 2nd..last piece of a tie.  Its length is
+        added to the note that started the tie (which is the only one played)."""
+        if tie is None or tie.type not in ('continue', 'stop'):
+            return False
+        head = pending.get(midi)
+        if head is not None:
+            head.duration += qlen
+            head.dur_real += qlen
+            if tie.type == 'stop':
+                del pending[midi]
+        return True          # orphan continuation: skip, as before
 
     for n in strm:
+        ql = n.duration.quarterLength
+        if ql == 0 or not (n.isNote or n.isChord):
+            continue
 
-        if n.duration.quarterLength==0 : continue
-
-        if hasattr(n, 'tie'): # address bug https://github.com/marcomusy/pianoplayer/issues/29
-            if n.tie and (n.tie.type=='continue' or n.tie.type=='stop'): continue
+        # Several voices in one part: notes on the same onset are all kept
+        # (they used to be dropped: no sound, no key, no finger).  The
+        # algorithm gets a tiny time shift so they stay distinct events.
+        off = float(n.offset)
+        if last_off is not None and abs(off - last_off) < 1e-6:
+            dup += 1
+        else:
+            last_off, dup, at_off = off, 0, set()
+        shift = sfasam * dup
 
         if n.isNote:
-            if len(noteseq) and n.offset == noteseq[-1].time:
-                # print "doppia nota", n.name
-                continue
-            an        = INote()
-            an.noteID += 1
-            an.note21 = n
-            an.isChord= False
-            an.name   = n.name
-            an.octave = n.octave
-            an.measure= n.measureNumber
-            an.x      = keypos(n)
-            an.time   = n.offset
-            an.duration = n.duration.quarterLength
-            an.isBlack= False
-            if hasattr(n, 'pitch'):
-                pc = n.pitch.pitchClass
-            else:
-                pc = n.pitchClass
-                an.isBlack = False
-            if pc in [1, 3, 6, 8, 10]: an.isBlack = True
+            p = getattr(n, 'pitch', n)
+            midi = int(p.midi)
+            tie = getattr(n, 'tie', None)
+            if _absorb(midi, tie, ql) or midi in at_off:
+                continue                 # tie piece, or same key twice at once
+            at_off.add(midi)
+
+            an          = INote()
+            an.noteID  += 1
+            an.note21   = n
+            an.isChord  = False
+            an.name     = n.name
+            an.octave   = n.octave
+            an.measure  = n.measureNumber
+            an.x        = keypos(n)
+            an.time     = off + shift
+            an.duration = ql
+            an.time_real = off
+            an.dur_real  = ql
+            an.isBlack  = p.pitchClass in (1, 3, 6, 8, 10)
             if n.lyrics: an.fingering = n.lyric
+            if tie is not None and tie.type == 'start':
+                pending[midi] = an
             noteseq.append(an)
 
-        elif n.isChord:
-
-            if n.tie and (n.tie.type=='continue' or n.tie.type=='stop'): continue
-            sfasam = 0.05 # sfasa leggermente le note dell'accordo
+        else:   # chord: every pitch has its own tie (Chord.tie is only the first)
+            cnotes = list(n.notes)
+            kept = []
             for j, cn in enumerate(n.pitches):
-                an = INote()
+                midi = int(cn.midi)
+                tie = cnotes[j].tie if j < len(cnotes) else None
+                if _absorb(midi, tie, ql) or midi in at_off:
+                    continue
+                at_off.add(midi)
+                kept.append((cn, midi, tie))
+            if not kept:
+                continue
+
+            for j, (cn, midi, tie) in enumerate(kept):
+                an          = INote()
                 an.chordID  = chordID
-                an.noteID += 1
-                an.isChord = True
-                an.chord21 = n
-                an.note21  = cn
-                an.name    = cn.name
-                an.chordnr = j
-                an.NinChord = len(n.pitches)
-                an.octave  = cn.octave
-                an.measure = n.measureNumber
-                an.x       = keypos(cn)
-                an.time    = n.offset                 -sfasam*j
-                an.duration= n.duration.quarterLength +sfasam*(an.NinChord-1)
-                if hasattr(cn, 'pitch'):
-                    pc = cn.pitch.pitchClass
-                else:
-                    pc = cn.pitchClass
-                if pc in [1, 3, 6, 8, 10]: an.isBlack = True
-                else: an.isBlack = False
+                an.noteID  += 1
+                an.isChord  = True
+                an.chord21  = n
+                an.note21   = cn
+                an.name     = cn.name
+                an.chordnr  = j
+                an.NinChord = len(kept)
+                an.octave   = cn.octave
+                an.measure  = n.measureNumber
+                an.x        = keypos(cn)
+                an.time     = off + shift - sfasam*j
+                an.duration = ql + sfasam*(len(kept)-1)
+                an.time_real = off
+                an.dur_real  = ql
+                an.isBlack  = cn.pitchClass in (1, 3, 6, 8, 10)
+                if tie is not None and tie.type == 'start':
+                    pending[midi] = an
                 noteseq.append(an)
 
             chordID += 1
@@ -193,7 +229,7 @@ def PIG2Stream(fname, beam=0, time_unit=.5, fixtempo=0):
             if '_' not in finger:
                 x = Fingering(abs(int(finger)))
                 x.style.absoluteY = 20
-            an.articulations.append(x)
+                an.articulations.append(x)
 
         if fixtempo:
             an.duration.quarterLength = fixtempo

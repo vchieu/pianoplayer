@@ -105,7 +105,7 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
 
         def vpCMD(self):
             from pianoplayer.vkeyboard import VirtualKeyboard
-            from pianoplayer.utils import score_tempo
+            from pianoplayer.utils import score_tempo, score_tempo_map
 
             if self.rh is None and self.lh is None:
                 print('Load a score and press GENERATE first.')
@@ -114,6 +114,7 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             vk = VirtualKeyboard(
                 songname=os.path.basename(str(getattr(self, 'filename', ''))),
                 tempo=score_tempo(getattr(self, 'sf', None)))
+            vk.tempo_map = score_tempo_map(getattr(self, 'sf', None))
             if self.Rcb.get() and self.rh is not None:
                 vk.build_RH(self.rh)
             if self.Lcb.get() and self.lh is not None:
@@ -235,13 +236,14 @@ else: ##########################################################################
 
     if args.with_vedo:
         from pianoplayer.vkeyboard import VirtualKeyboard
-        from pianoplayer.utils import score_tempo
+        from pianoplayer.utils import score_tempo, score_tempo_map
 
         if args.start_measure !=1:
             print('Sorry, start_measure must be set to 1 when -v option is used. Exit.')
             exit()
 
         vk = VirtualKeyboard(songname=xmlfn, tempo=score_tempo(sf))
+        vk.tempo_map = score_tempo_map(sf)
 
         if not args.left_only:
             vk.build_RH(rh)

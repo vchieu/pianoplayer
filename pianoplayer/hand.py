@@ -3,6 +3,8 @@
 # Purpose:      Find optimal fingering for piano scores
 # Author:       Marco Musy
 #-------------------------------------------------------------------------------
+import copy
+
 from music21.articulations import Fingering
 import pianoplayer.utils as utils
 
@@ -183,6 +185,21 @@ class Hand:
         if self.depth < 3: self.depth = 3
         if self.depth > 9: self.depth = 9
 
+        # fewer than 9 notes: optimize_seq needs exactly 9, so pad the window
+        # with dummy notes (same pitch, later in time) and solve it once.
+        if 2 <= N < 9:
+            pad = list(self.noteseq)
+            last = pad[-1]
+            for k in range(9 - N):
+                q = copy.copy(last)
+                q.isChord = False
+                q.time = last.time + k + 1
+                pad.append(q)
+            self.autodepth = False
+            self.depth = 9
+            res, vel = self.optimize_seq(pad, 0)
+            out = [0] + list(res)      # slot 0 is "consumed" by pop(1) below
+
         self.fingerseq = []        # fingertip fan of every processed note ..
         self.fingerseq_index = []  # .. and the noteseq index it belongs to
 
@@ -199,7 +216,7 @@ class Hand:
 
             best_finger = 0
             ninenotes = self.noteseq[i : i+9]
-            if i > N-10:
+            if i > N-9:                 # window of 9 is still complete at i=N-9
                 if len(out)>1: best_finger = out.pop(1)
             else:
                 out, vel  = self.optimize_seq(ninenotes, start_finger)
@@ -213,7 +230,7 @@ class Hand:
             self.fingerseq.append(list(self.cfps))
             self.fingerseq_index.append(i)
 
-            if best_finger>0 and i < N-3:
+            if best_finger>0:
                 fng = Fingering(best_finger)
                 if an.isChord:
                     if len(an.chord21.pitches) < 3:

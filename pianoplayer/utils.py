@@ -70,50 +70,20 @@ def krelease(f):
         f.color("w")
 
 
-_kb_layout = {
-    "C"  : 0.5,
-    "D"  : 1.5,
-    "E"  : 2.5,
-    "F"  : 3.5,
-    "G"  : 4.5,
-    "A"  : 5.5,
-    "B"  : 6.5,
-    "B#" : 0.5,
-    "C#" : 1.0,
-    "D#" : 2.0,
-    "E#" : 3.5,
-    "F#" : 4.0,
-    "G#" : 5.0,
-    "A#" : 6.0,
-    "C-" : 6.5,
-    "D-" : 1.0,
-    "E-" : 2.0,
-    "F-" : 2.5,
-    "G-" : 4.0,
-    "A-" : 5.0,
-    "B-" : 6.0,
-    "C##": 1.5,
-    "D##": 2.5,
-    "F##": 4.5,
-    "G##": 5.5,
-    "A##": 6.5,
-    "D--": 0.5,
-    "E--": 1.5,
-    "G--": 3.5,
-    "A--": 4.5,
-    "B--": 5.5,
-}
+_PC_STEP = {0: 0.5, 1: 1.0, 2: 1.5, 3: 2.0, 4: 2.5, 5: 3.5,
+            6: 4.0, 7: 4.5, 8: 5.0, 9: 5.5, 10: 6.0, 11: 6.5}
 
 
-def keypos(n):  # position of notes on keyboard
-    step = 0.0
-    keybsize = 16.5  # cm
-    k = keybsize / 7.0  # 7 notes
-    if n.name in _kb_layout.keys():
-        step = _kb_layout[n.name] * k
-    else:
-        print("ERROR note not found", n.name)
-    return keybsize * n.octave + step
+def keypos(n):
+    """Keyboard x [cm] of a music21 Note or Pitch.
+
+    Computed from the MIDI number, so enharmonic spellings (B#3 = C4,
+    Cb4 = B3, E#, Fb, C##, B##, Dbb ...) land on the right physical key
+    and always agree with the sound and with vkeyboard._key_x().
+    """
+    p = getattr(n, "pitch", n)
+    midi = int(round(p.ps))
+    return 16.5 * (midi // 12 - 1) + _PC_STEP[midi % 12] * (16.5 / 7.0)
 
 
 def handSizeFactor(s):
@@ -185,15 +155,30 @@ def key_drop(x, y, amount=1.0) -> float:
     return max(KEY_PIVOT_Y - y, 0.0) * math.sin(math.radians(a))
 
 
-def score_tempo(sf, default=72.0):
-    """Tempo (BPM) of a music21 score, or `default` when not found."""
+def score_tempo_map(sf, default=72.0):
+    """
+    [(offset in quarter lengths, quarter-note bpm), ...], sorted, first at 0.
+
+    Uses MetronomeMark.getQuarterBPM(), which accounts for the referent
+    (eighth = 120 is 60 bpm of quarters, dotted quarter = 60 is 90, ...).
+    """
+    found = {}
     try:
-        from music21.tempo import MetronomeMark, TempoIndication
-        for cls in (MetronomeMark, TempoIndication):
-            for mark in sf.recurse().getElementsByClass(cls):
-                number = getattr(mark, "number", None)
-                if number and float(number) > 0:
-                    return float(number)
+        from music21.tempo import MetronomeMark
+        for mm in sf.recurse().getElementsByClass(MetronomeMark):
+            bpm = mm.getQuarterBPM()
+            if bpm and float(bpm) > 0:
+                found[round(float(mm.getOffsetInHierarchy(sf)), 6)] = float(bpm)
     except Exception:
         pass
-    return float(default)
+    if not found:
+        return [(0.0, float(default))]
+    tm = sorted(found.items())
+    if tm[0][0] > 0:
+        tm.insert(0, (0.0, tm[0][1]))
+    return tm
+
+
+def score_tempo(sf, default=72.0):
+    """First tempo (quarter-note bpm) of a music21 score, or `default`."""
+    return score_tempo_map(sf, default)[0][1]

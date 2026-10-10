@@ -173,10 +173,10 @@ def _write_key_matrix(m4, amount, black):
 # --------------------------------------------------------------------------- #
 class _Ev:
     __slots__ = ("t_on", "t_off", "midi", "vel", "finger", "black",
-                 "measure", "name", "fx", "key", "fired")
+                 "measure", "name", "fx", "key", "fired", "wx")
 
     def __init__(self, t_on, t_off, midi, vel, finger, black, measure,
-                 name, fx):
+                 name, fx, wx=None):
         self.t_on = t_on
         self.t_off = t_off
         self.midi = midi
@@ -186,6 +186,7 @@ class _Ev:
         self.measure = measure
         self.name = name            # e.g. "C#3"
         self.fx = fx                # {finger: world x} fan, or None
+        self.wx = wx                # world x of the key this note presses
         self.key = None             # 3D key mesh name, filled on press
         self.fired = False
 
@@ -231,6 +232,7 @@ class VirtualKeyboard:
         self.verbose = True
         self.songname = songname
         self.tempo = float(tempo)   # beats per minute of the score
+        self.tempo_map = None       # [(offset_quarters, bpm)], None = constant
         self.speedfactor = 1.0      # playback rate (image + sound)
         self.volume = 0.8
         self.t0 = 0                 # legacy attributes
@@ -242,6 +244,8 @@ class VirtualKeyboard:
 
         self.engine = None
         self._audio_epoch = -LEAD_IN   # score time of engine time 0
+        self._engine_wall = 0.0        # wall time when engine time was 0
+        self._latency = 0.0            # largest output latency seen so far
         self._underrun_seen = 0        # buffer holes already reported
         self._players = {}
         self._key_black = {}
@@ -515,6 +519,18 @@ class VirtualKeyboard:
         return self
 
     # ------------------------------------------------------------------ score
+    def _beat_seconds(self, beat):
+        """Seconds (already divided by speedfactor) at quarter-length `beat`,
+        integrating the tempo map piece by piece."""
+        tm = self.tempo_map or [(0.0, float(self.tempo))]
+        t = 0.0
+        for k, (off, bpm) in enumerate(tm):
+            if beat <= off:
+                break
+            end = tm[k + 1][0] if k + 1 < len(tm) else float("inf")
+            t += (min(beat, end) - off) * 60.0 / max(bpm, 1e-3)
+        return t / max(float(self.speedfactor), 1e-6)
+
     def _events_for(self, hand, sign, pan):
         """Turn a Hand noteseq into a time ordered list of _Ev."""
         sc = 60.0 / (max(float(self.tempo), 1e-3)
@@ -525,6 +541,7 @@ class VirtualKeyboard:
         # subset of the notes, e.g. when a measure range was requested)
         fan_of = {}
         idxs = list(getattr(hand, "fingerseq_index", []) or [])
+        played = set(idxs) if idxs else None   # None = Hand never generated
         if fseq and len(idxs) == len(fseq):
             fan_of = {i2: row for i2, row in zip(idxs, fseq)}
         elif len(fseq) == len(nseq) and fseq:
@@ -534,6 +551,8 @@ class VirtualKeyboard:
 
         evs = []
         for i, n in enumerate(nseq):
+            if played is not None and i not in played:
+                continue                       # outside -n / -s range
             try:
                 wx = sign * float(n.x)
             except Exception:
@@ -556,11 +575,13 @@ class VirtualKeyboard:
                     midi = None
 
             try:
-                t_on = float(n.time) * sc
+                q_on = float(getattr(n, "time_real", n.time))
+                t_on = self._beat_seconds(q_on)
             except Exception:
-                t_on = 0.0
+                q_on, t_on = 0.0, 0.0
             try:
-                dur = float(n.duration) * sc
+                q_len = float(getattr(n, "dur_real", n.duration))
+                dur = self._beat_seconds(q_on + q_len) - t_on
             except Exception:
                 dur = 0.0
             if dur <= 1e-4:
@@ -577,7 +598,7 @@ class VirtualKeyboard:
             # down beats are accented, the thumb is stronger than the little
             # finger, plus a small deterministic humanisation.
             try:
-                beatpos = float(n.time)
+                beatpos = float(getattr(n, "time_real", n.time))
             except Exception:
                 beatpos = 0.0
             onbeat = 1.0 - min(abs(beatpos - round(beatpos)) * 3.0, 1.0)
@@ -599,7 +620,7 @@ class VirtualKeyboard:
 
             evs.append(_Ev(t_on, t_on + dur, midi, vel, fing,
                            key_is_black(wx), int(getattr(n, "measure", 0) or 0),
-                           name, fx))
+                           name, fx, wx))
 
         evs.sort(key=lambda e: e.t_on)
 
@@ -750,6 +771,8 @@ class VirtualKeyboard:
         # at score time T is *heard* exactly when the hands play it:
         #   when = T - _audio_epoch = T + t0 - engine_wall - latency
         latency = getattr(self.engine, "output_latency", 0.0) if self.engine else 0.0
+        self._engine_wall = engine_wall
+        self._latency = latency
         self._audio_epoch = engine_wall + latency - self._t0
         self._last = _time.time()
 
@@ -826,8 +849,6 @@ class VirtualKeyboard:
         while p.aim + 1 < len(notes) and notes[p.aim + 1].t_on - AIM_LEAD <= now:
             p.aim += 1
         target = notes[p.aim] if p.aim < len(notes) else None
-        if target is not None and target.fx:
-            p.finger_x = target.fx
 
         # presses due --------------------------------------------------------
         while p.fire < len(notes) and notes[p.fire].t_on <= now:
@@ -847,6 +868,15 @@ class VirtualKeyboard:
                 p.held.pop(i)
             else:
                 i += 1
+
+        # Finger targets: fan of the note we are heading to, but every finger
+        # that is currently holding a key stays exactly on that key.
+        fx = (dict(target.fx) if (target is not None and target.fx)
+              else dict(p.finger_x))
+        for e in p.held:                       # oldest first, newest wins
+            if e.finger and e.wx is not None:
+                fx[e.finger] = e.wx
+        p.finger_x = fx
 
         # is a black key coming up soon? -------------------------------------
         advance = bool(target is not None and target.black
@@ -880,6 +910,13 @@ class VirtualKeyboard:
             # while VTK renders and the playback ring would drain (heard as
             # stuttering).  Costs a few ms only when the ring is low.
             engine.pump()
+            # Every underrun pads the stream with silence, which delays all
+            # later samples for good.  Re-measure each frame (the figure only
+            # grows) so notes scheduled from now on compensate for it.
+            lat = engine.output_latency
+            if lat > self._latency:
+                self._latency = lat
+                self._audio_epoch = self._engine_wall + lat - self._t0
             seen = engine.underruns
             if seen != self._underrun_seen:      # report each hole the moment
                 self._underrun_seen = seen       # it happens, with its position

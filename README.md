@@ -75,7 +75,7 @@ pianoplayer [-h] [-o] [-n] [-s] [-d] [-k] [-rbeam] [-lbeam] [-q] [-m] [-v] [--ve
 #   -m, --musescore       Open output in musescore after processing
 #   -b, --below-beam      Show fingering numbers below beam line
 #   -v, --with-vedo       Play the 3D scene with sound after processing
-#   --vedo-speed          [1.5] Playback speed factor (animation and sound)
+#   --vedo-speed          [1.0] Playback speed factor (animation and sound)
 #   -z, --sound-off       Disable sound
 #   -l, --left-only       Fingering for left hand only
 #   -r, --right-only      Fingering for right hand only
@@ -127,7 +127,10 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent;
 - **tempo comes from the score**: every note - including chords - sounds at
-  its exact onset time; `--vedo-speed` scales both animation and sound;
+  its exact onset time, tempo marks with any referent (eighth = 120,
+  dotted quarter = 60, ...) are interpreted correctly and tempo changes
+  inside the score are honored; `--vedo-speed` scales both animation
+  and sound;
 - **HUD** (top left) shows elapsed/total time, current measure and tempo,
   plus a progress strip along the fall line;
 - the built-in synthesiser renders a full polyphonic piano with no samples,
