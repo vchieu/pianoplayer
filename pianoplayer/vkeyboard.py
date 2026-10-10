@@ -64,7 +64,11 @@ KEY_TOL = 0.12
 FPS_MS = 16               # animation period [ms]
 LEAD_IN = 0.8             # s before the first note: hands settle in place
 AIM_LEAD = 0.25           # s ahead at which the hand aims at the next note
-AUDIO_LOOKAHEAD = 0.30    # s of audio events scheduled in advance
+AUDIO_LOOKAHEAD = 0.75    # s of audio events scheduled in advance: must stay
+                          # above cushion + measured output latency + worst
+                          # frame (0.30 + 0.02 + 0.15), otherwise the note is
+                          # handed over after the synth has already rendered
+                          # past it and gets clamped to "now"
 BLACK_AIM = 0.45          # s before a black-key note the hand slides forward
 TAU_PRESS = 0.012         # key/finger easing while pressing [s]
 TAU_RELEASE = 0.032       # ... while releasing [s]
@@ -616,6 +620,10 @@ class VirtualKeyboard:
             try:
                 self.engine = SoundEngine(volume=self.volume, enabled=True)
                 self.engine.start()
+                # right after start(): the device is already pulling, so this
+                # is when sample 0 of the synth clock reaches the speakers
+                # (start() may spend a while pre-rendering the audio cushion)
+                engine_wall = _time.time()
                 if self.verbose and self.engine.backend_name != "none":
                     print("Audio backend:", self.engine.backend_name)
             except Exception as exc:
@@ -636,10 +644,15 @@ class VirtualKeyboard:
         self._hud_t = -1e9
         self._ended = False
         self._t0 = _time.time() + LEAD_IN
-        # the synth counts seconds from the engine start while the score
-        # counts them from _t0: keep the offset, so that a note placed at
-        # score time T lands at engine time (T - _audio_epoch).
-        self._audio_epoch = engine_wall - self._t0
+        # The synth counts seconds from the engine start, the score counts
+        # them from _t0, and a sample rendered at engine time t only reaches
+        # the speakers output_latency seconds later -- which the backend
+        # *measures* (any silence the device had to pad in while priming its
+        # buffer, plus the OS mixer).  Fold both offsets in, so a note written
+        # at score time T is *heard* exactly when the hands play it:
+        #   when = T - _audio_epoch = T + t0 - engine_wall - latency
+        latency = getattr(self.engine, "output_latency", 0.0) if self.engine else 0.0
+        self._audio_epoch = engine_wall + latency - self._t0
         self._last = _time.time()
 
     def _teardown(self):
@@ -649,6 +662,11 @@ class VirtualKeyboard:
 
     def _stop_audio(self):
         if self.engine is not None:
+            try:
+                if self.verbose and self.engine.underruns:
+                    print("audio: %d buffer underrun(s)" % self.engine.underruns)
+            except Exception:
+                pass
             try:
                 self.engine.all_notes_off()
             except Exception:
@@ -758,6 +776,12 @@ class VirtualKeyboard:
 
     def _frame(self, now, dt):
         engine = self.engine      # the synth clock runs even without a device
+        if engine is not None:
+            # Render the audio *here*, on the thread that owns the window:
+            # a background thread cannot get enough of the interpreter lock
+            # while VTK renders and the playback ring would drain (heard as
+            # stuttering).  Costs a few ms only when the ring is low.
+            engine.pump()
         for p in self._players.values():
             advance = self._pump(p, now, engine)
 

@@ -8,13 +8,15 @@ and writes screenshots + sanity checks in ./test_play_out/.
 """
 import os
 import sys
+import time
 
 from music21 import converter
 
 from pianoplayer.hand import Hand
 from pianoplayer.scorereader import reader
 from pianoplayer.utils import score_tempo
-from pianoplayer.vkeyboard import VirtualKeyboard
+from pianoplayer.vkeyboard import (AUDIO_LOOKAHEAD, FPS_MS, LEAD_IN,
+                                   VirtualKeyboard)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "test_play_out")
@@ -48,12 +50,14 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
 
     vk = VirtualKeyboard(songname=fn, tempo=tempo, offscreen=True)
     vk.verbose = False
+    vk.volume = 0.0                    # the device must be silent
     vk.speedfactor = 1.0
     vk.build_RH(rh)
     vk.build_LH(lh)
 
     stats = {"on": 0, "off": 0}
     sched_err = []          # (note score time) - (frame time) for every note_on
+    clamped = []            # engine time by which a note arrived behind the synth
     clock = {"t": -0.5}
     vk._prepare()
     if vk.engine is not None:
@@ -66,6 +70,11 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
                 # the engine works on its own absolute clock: translate the
                 # scheduled time back to score time and compare with the frame
                 sched_err.append((w + vk._audio_epoch) - clock["t"])
+                # ... and make sure the note is not already in the past of the
+                # synth clock, where SynthCore would clamp it to "now" and the
+                # sound would lag behind the hands
+                if w < vk.engine.now - 1e-3:
+                    clamped.append(vk.engine.now - w)
             return raw_on(*a, **k)
 
         def off(*a, **k):
@@ -76,9 +85,12 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
         vk.engine.note_off = off
 
     # ---- drive the loop ---------------------------------------------------
-    dt = 1.0 / 60.0
+    # Paced by the wall clock exactly like _on_timer: the synth runs on that
+    # clock too, so a hand-rolled "t += dt" loop would let the engine race
+    # ahead of the score and make every note look late.
     shots = {1.0: "t1.0", 3.0: "t3.0", 6.0: "t6.0", 9.0: "t9.0"}
-    t = -0.5
+    t = -LEAD_IN
+    dt = FPS_MS / 1000.0
     pressed_peak = 0
     keys_down = set()
     rig_moves = []
@@ -91,13 +103,18 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
         for name, amt in vk._key_amt.items():
             if amt > 0.5:
                 keys_down.add(name)
-        if abs(t - 3.0) < dt / 2:
+        if not rig_moves and t >= 3.0:
             rig_moves.append(tuple(vk.RH.root.round(2)))
         for mark, tag in list(shots.items()):
             if t >= mark:
                 vk.vp.screenshot(os.path.join(OUT, "%s.png" % tag))
                 del shots[mark]
-        t += dt
+        # next frame: score time follows the wall clock (see _on_timer)
+        tn = time.time() - vk._t0
+        dt = tn - t
+        if dt <= 0.0 or dt > 0.25:
+            dt = FPS_MS / 1000.0
+        t = tn
 
     vk.vp.screenshot(os.path.join(OUT, "t_end.png"))
 
@@ -115,12 +132,24 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     ok = True
     if sched_err:
         lo, hi = min(sched_err), max(sched_err)
-        print("note_on lead time: %.3f .. %.3f s" % (lo, hi))
-        if lo < -0.05 or hi > 0.33:
+        print("note_on lead time: %.3f .. %.3f s (lookahead %.2f)"
+              % (lo, hi, AUDIO_LOOKAHEAD))
+        # events must be handed over before the animation reaches them, but
+        # not earlier than the announced lookahead (+ one frame of slack)
+        if lo < -0.05 or hi > AUDIO_LOOKAHEAD + 1.0 / 60.0 + 1e-6:
             print("FAIL: audio events are not aligned with the animation")
             ok = False
     elif rh.noteseq:
         print("FAIL: no note carried a scheduling time"); ok = False
+    if clamped:
+        # a stalled frame (a slow screenshot) lets the synth clock slip a few
+        # ms past a note; what matters is a *structural* miss, which shows up
+        # as a clamp of a third of a second and more
+        print("note_on clamped: %d, worst %.3f s"
+              % (len(clamped), max(clamped)))
+        if max(clamped) > 0.05:
+            print("FAIL: audio events reached the synth too late")
+            ok = False
     if stats["on"] < 5:
         print("FAIL: not enough audio events scheduled"); ok = False
     if pressed_peak < 1 and len(rh.noteseq):

@@ -28,9 +28,11 @@ Backends, in order of preference: miniaudio, sounddevice, none.
 """
 from __future__ import annotations
 
+import collections
 import heapq
 import math
 import queue
+import sys
 import threading
 import time
 import wave
@@ -360,34 +362,200 @@ class SynthCore:
 
 
 ##################################################### audio backends
-class _MiniAudioBackend:
-    name = "miniaudio"
+class _CushionBackend:
+    """
+    Pre-rendered audio ring shared by the real device backends.
+
+    Two separate problems are solved here:
+
+    1. *The device callback must answer within one device period* or the
+       output underruns -- heard as stuttering.  So the callback never
+       renders: it only *copies* bytes out of a ring of ready made chunks,
+       which takes a fraction of a millisecond.
+
+    2. *Filling that ring has to happen somewhere that can get the
+       interpreter lock.*  Rendering is numpy work, and numpy drops the lock
+       and then has to win it back; while the animation thread sits inside
+       VTK -- which keeps the lock for a whole 3D render -- a background
+       thread measured out at less than 1% of a core and the ring simply
+       emptied.  The player therefore fills the ring itself through
+       `pump()`, from the one thread that always owns the lock.  The feeder
+       thread kept here only looks after engines nobody pumps.
+
+    A sample rendered at engine time ``t`` is *heard* at ``t +
+    output_latency``; the player subtracts that when it works out the audio
+    epoch.  The figure is *measured*, not assumed: the device may ask for
+    more frames than have been rendered while it primes its buffer before
+    playback, the shortfall goes out as silence, and every later sample is
+    then heard exactly that much later than the engine clock says.
+    """
+
+    CHUNK = 1024            # frames per pre-rendered chunk (~23 ms)
+    CUSHION = 0.30          # ring level the pump aims for (seconds)
+    BUFFER_MS = 60          # device period.  The device primes a few periods
+                            # in one go before playback starts, so this also
+                            # sets how much has to be pre-rendered: keep it
+                            # well under CUSHION or the priming consumes the
+                            # cushion and `_take` has to pad with silence,
+                            # which shifts every later sample on the stream.
+    IDLE_PUMP = 0.40        # feeder only takes over after this long unserved
+    ENGINE_LATENCY = 0.02   # OS mixer + DAC, on top of any measured gap
 
     def __init__(self, synth: SynthCore, volume_getter):
         self.synth = synth
         self.volume_getter = volume_getter
+        self.underruns = 0
+        self._pulled = 0             # frames the device ever asked for
+        self._chunks = collections.deque()
+        self._partial = b""          # tail of the chunk being consumed
+        self._lock = threading.Lock()
+        self._render_lock = threading.Lock()   # one renderer at a time
+        self._last_pump = time.time()
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def output_latency(self) -> float:
+        """
+        Seconds between a sample being rendered and being heard.
+
+        Two parts: the OS mixer + DAC, and whatever the stream got shifted
+        by.  While the device primes its buffer it may pull more frames than
+        the synth has rendered; `_take` pads that with silence, and from then
+        on every sample reaches the speakers that much later than the engine
+        clock claims.  Rather than assume a value, measure the gap.
+        """
+        with self._lock:
+            ring = len(self._chunks) * self.CHUNK + len(self._partial) // 4
+            shipped = self.synth.frame - ring    # frames actually handed over
+            gap = self._pulled - shipped         # ...vs frames asked for
+        return self.ENGINE_LATENCY + max(gap, 0) / float(self.synth.sr)
+
+    # ------------------------------------------------------------- filling
+    def _target(self):
+        return int(self.CUSHION * self.synth.sr)
+
+    def _render_chunk(self):
+        mix = SynthCore.master(self.synth.render_block(self.CHUNK),
+                               self.volume_getter())
+        pcm = np.ascontiguousarray(mix * 32767.0, dtype=np.int16)
+        return pcm.tobytes()
+
+    def _buffered(self):
+        with self._lock:
+            return len(self._chunks) * self.CHUNK + len(self._partial) // 4
+
+    def pump(self, budget=0.030) -> int:
+        """
+        Render audio ahead from the **calling** thread (the animation loop).
+
+        Returns the number of chunks made.  Never blocks: if the fallback
+        feeder happens to hold the render lock we simply try again on the
+        next frame, which also makes a deadlock impossible.
+        """
+        self._last_pump = time.time()
+        target = self._target()
+        if self._buffered() >= target:
+            return 0
+        if not self._render_lock.acquire(blocking=False):
+            return 0
+        made = 0
+        deadline = time.perf_counter() + budget
+        try:
+            while self._buffered() < target and time.perf_counter() < deadline:
+                chunk = self._render_chunk()
+                with self._lock:
+                    self._chunks.append(chunk)
+                made += 1
+        finally:
+            self._render_lock.release()
+        return made
+
+    def _feed(self):
+        """Fallback renderer for an engine nobody pumps (see `pump()`)."""
+        while not self._stop.is_set():
+            if (time.time() - self._last_pump < self.IDLE_PUMP
+                    or self._buffered() >= self._target()):
+                time.sleep(0.05)
+                continue
+            if not self._render_lock.acquire(blocking=False):
+                time.sleep(0.02)
+                continue
+            try:
+                chunk = self._render_chunk()
+                with self._lock:
+                    self._chunks.append(chunk)
+            finally:
+                self._render_lock.release()
+            time.sleep(0.01)
+
+    # -------------------------------------------------------- device side
+    def _take(self, frames):
+        nbytes = frames * 4           # 16 bit, 2 channels
+        with self._lock:
+            self._pulled += frames
+            while len(self._partial) < nbytes and self._chunks:
+                self._partial += self._chunks.popleft()
+            if len(self._partial) < nbytes:
+                self.underruns += 1
+                out = self._partial + b"\x00" * (nbytes - len(self._partial))
+                self._partial = b""
+                return out
+            out = self._partial[:nbytes]
+            self._partial = self._partial[nbytes:]
+            return out
+
+    # ------------------------------------------------------------- lifecycle
+    def _pre_fill(self):
+        # Fill the ring *before* the device opens: sample 0 then sits at the
+        # front of the ring when playback begins.  The ring also has to be
+        # deep enough to survive the device asking for several periods in one
+        # go while it primes its buffer -- see `output_latency`.
+        want = self._target()
+        while self._buffered() < want:
+            with self._lock:
+                self._chunks.append(self._render_chunk())
+
+    def _start_feeder(self):
+        self._thread = threading.Thread(target=self._feed, daemon=True,
+                                        name="pianoplayer-feeder")
+        self._thread.start()
+
+    def _shutdown(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+
+class _MiniAudioBackend(_CushionBackend):
+    name = "miniaudio"
+
+    def __init__(self, synth: SynthCore, volume_getter):
+        super().__init__(synth, volume_getter)
         self.device = None
 
     def start(self):
+        self._pre_fill()
         self.device = miniaudio.PlaybackDevice(
             output_format=miniaudio.SampleFormat.SIGNED16,
             nchannels=2,
             sample_rate=self.synth.sr,
-            buffersize_msec=25,
+            buffersize_msec=self.BUFFER_MS,
         )
         gen = self._generator()
         next(gen)                      # prime the generator
         self.device.start(gen)
+        self._start_feeder()
 
     def _generator(self):
         required = yield b""
         while True:
-            n = int(required) if required else 512
-            mix = SynthCore.master(self.synth.render_block(n), self.volume_getter())
-            pcm = np.ascontiguousarray(mix * 32767.0, dtype=np.int16)
-            required = yield pcm.tobytes()
+            n = int(required) if required else self.CHUNK
+            yield self._take(n)
 
     def stop(self):
+        self._shutdown()
         if self.device is not None:
             try:
                 self.device.close()
@@ -396,26 +564,30 @@ class _MiniAudioBackend:
             self.device = None
 
 
-class _SounddeviceBackend:
+class _SounddeviceBackend(_CushionBackend):
     name = "sounddevice"
 
     def __init__(self, synth: SynthCore, volume_getter):
-        self.synth = synth
-        self.volume_getter = volume_getter
+        super().__init__(synth, volume_getter)
         self.stream = None
 
     def start(self):
+        self._pre_fill()
+
         def cb(outdata, frames, time_info, status):
-            mix = SynthCore.master(self.synth.render_block(frames), self.volume_getter())
-            outdata[:] = (mix * 32767.0).astype(np.int16).reshape(-1, 2)
+            raw = self._take(frames)
+            outdata[:] = np.frombuffer(raw, dtype=np.int16).reshape(-1, 2)
 
         self.stream = _sounddevice.OutputStream(
             samplerate=self.synth.sr, channels=2, dtype="int16",
-            blocksize=512, callback=cb,
+            blocksize=int(self.BUFFER_MS / 1000.0 * self.synth.sr),
+            callback=cb,
         )
         self.stream.start()
+        self._start_feeder()
 
     def stop(self):
+        self._shutdown()
         if self.stream is not None:
             try:
                 self.stream.stop()
@@ -423,6 +595,18 @@ class _SounddeviceBackend:
             except Exception:
                 pass
             self.stream = None
+
+    @property
+    def output_latency(self) -> float:
+        """Measured gap + what PortAudio itself reports for the stream."""
+        try:
+            reported = float(self.stream.latency)
+        except Exception:
+            reported = self.ENGINE_LATENCY
+        with self._lock:
+            ring = len(self._chunks) * self.CHUNK + len(self._partial) // 4
+            gap = self._pulled - (self.synth.frame - ring)
+        return reported + max(gap, 0) / float(self.synth.sr)
 
 
 class _NullBackend:
@@ -471,12 +655,18 @@ class SoundEngine:
         self._backend = _NullBackend(self.synth, lambda: self.volume)
         self._backend_pref = backend
         self._started = False
+        self._saved_switch = None
 
     # ----------------------------------------------------------- lifecycle
     def start(self):
         if self._started:
             return self
         self._started = True
+        # Give the audio/feeder threads the interpreter lock more often: the
+        # 3D thread can hold it for a whole VTK render otherwise.
+        self._saved_switch = sys.getswitchinterval()
+        if self._saved_switch > 0.001:
+            sys.setswitchinterval(0.001)
         if self.enabled:
             backend = self._make_backend()
             try:
@@ -514,7 +704,38 @@ class SoundEngine:
             self._backend.stop()
         except Exception:
             pass
+        saved = getattr(self, "_saved_switch", None)
+        if saved:
+            sys.setswitchinterval(saved)
         self._started = False
+
+    @property
+    def underruns(self) -> int:
+        """Audio callbacks that ran out of data (heard as a glitch)."""
+        return int(getattr(self._backend, "underruns", 0))
+
+    @property
+    def output_latency(self) -> float:
+        """Seconds between a sample being rendered and being heard."""
+        return float(getattr(self._backend, "output_latency", 0.0))
+
+    def pump(self, budget=0.030) -> int:
+        """
+        Render audio into the playback buffer ahead of time.
+
+        Call this once per animation frame from the thread that drives the
+        window: a background thread cannot get enough of the interpreter
+        lock to keep up while a 3D render is running (see
+        `_CushionBackend.pump`).  Does nothing for backends that render on
+        demand or do not play at all.
+        """
+        fn = getattr(self._backend, "pump", None)
+        if fn is None:
+            return 0
+        try:
+            return int(fn(budget=budget))
+        except TypeError:
+            return int(fn())
 
     # ----------------------------------------------------------- transport
     @property
