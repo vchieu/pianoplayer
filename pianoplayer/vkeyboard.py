@@ -29,7 +29,7 @@ import os
 import time as _time
 
 try:
-    from vedo import Box, Disc, Plotter, Text2D, Text3D, settings as _vsettings
+    from vedo import Box, Plotter, Text2D, Text3D, settings as _vsettings
 except Exception:  # pragma: no cover - vedo is mandatory at runtime
     pass
 
@@ -244,7 +244,6 @@ class VirtualKeyboard:
         self._audio_epoch = -LEAD_IN   # score time of engine time 0
         self._underrun_seen = 0        # buffer holes already reported
         self._players = {}
-        self._hand_shadows = {}
         self._key_black = {}
         self._key_by_midi = {}
         self._key_amt = {}
@@ -469,11 +468,13 @@ class VirtualKeyboard:
             return
         cx = getattr(self, "_cx", self._span / 2 + KEYBSIZE)
         # top-down view: keep the lights high so the key tops and the backs of
-        # the hands are lit, with a slight offset for readable shading
+        # the hands are lit, with a slight offset for readable shading.
+        # The total is kept just above 1: the skin tone is already bright and
+        # anything more blows the hands out to white.
         specs = (
-            ((cx - 30, -55, 95), (cx, -4, 0), 0.95, (1.00, 0.97, 0.92)),
-            ((cx + 45, -25, 80), (cx, 0, 0), 0.50, (0.86, 0.92, 1.00)),
-            ((cx, 55, 75), (cx, 4, 0), 0.40, (1.00, 1.00, 1.00)),
+            ((cx - 30, -55, 95), (cx, -4, 0), 0.62, (1.00, 0.97, 0.92)),
+            ((cx + 45, -25, 80), (cx, 0, 0), 0.30, (0.86, 0.92, 1.00)),
+            ((cx, 55, 75), (cx, 4, 0), 0.22, (1.00, 1.00, 1.00)),
         )
         # with the shadow map pass only one light can be used: every light
         # must own a shadow map, otherwise its contribution is dropped.
@@ -497,30 +498,12 @@ class VirtualKeyboard:
             pass
 
     # ------------------------------------------------------------------ hands
-    def _make_shadow(self):
-        """Soft contact shadow that follows a hand.
-
-        Real shadow maps (see the `shadows` option) do not cover the whole
-        keyboard, so a cheap flat blob is used instead: it is drawn just
-        above the key tops, where a hand shadow would fall.
-        """
-        d = Disc(pos=(0, -5.0, 0.56), r1=0.001, r2=1.0, res=20,
-                 c=(0.02, 0.02, 0.04), alpha=0.13)
-        d.scale(8.5, 5.0, 1.0)
-        try:
-            d.actor.GetProperty().LightingOff()
-        except Exception:
-            pass
-        self.vp.add(d)
-        return d
-
     def build_RH(self, hand):
         """Attach a `pianoplayer.hand.Hand` (side='right') to the scene."""
         self.rightHand = hand
         self.RH = HandRig(side="right", size=getattr(hand, "size", "M"))
         self.RH.add_to(self.vp)
         self.vpRH = self.RH
-        self._hand_shadows["R"] = self._make_shadow()
         return self
 
     def build_LH(self, hand):
@@ -529,7 +512,6 @@ class VirtualKeyboard:
         self.LH = HandRig(side="left", size=getattr(hand, "size", "M"))
         self.LH.add_to(self.vp)
         self.vpLH = self.LH
-        self._hand_shadows["L"] = self._make_shadow()
         return self
 
     # ------------------------------------------------------------------ score
@@ -918,12 +900,6 @@ class VirtualKeyboard:
                     p.press[f] = newv
 
             p.rig.update(dt, p.finger_x, p.press, advance_black=advance)
-
-            sh = self._hand_shadows.get(p.side)
-            if sh is not None:
-                root = p.rig.root
-                sh.pos(float(root[0]),
-                       -5.0 + (float(root[1]) - HandRig.ROOT_Y), 0.56)
 
         self._sync_keys(dt)
         self._hud_update(now)
