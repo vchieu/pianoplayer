@@ -9,11 +9,16 @@ from music21.articulations import Fingering
 import pianoplayer.utils as utils
 
 
-def _set_fingering(n21, fng):
-    """Attach a Fingering articulation, replacing any previous one:
-    re-running generate() must not double the annotation."""
-    for a in [a for a in n21.articulations if isinstance(a, Fingering)]:
-        n21.articulations.remove(a)
+def _set_fingering(n21, fng, replace=True):
+    """Attach a Fingering articulation.
+
+    `replace=False` keeps the fingering already there: a chord gets
+    one number per pitch, and only its first note (`chordnr == 0`)
+    purges the previous run's numbers -- so re-running generate()
+    neither drops nor doubles the annotation."""
+    if replace:
+        for a in [a for a in n21.articulations if isinstance(a, Fingering)]:
+            n21.articulations.remove(a)
     n21.articulations.append(fng)
 
 
@@ -251,7 +256,10 @@ class Hand:
                             nl = len(an.chord21.pitches) - an.chordnr
                             an.chord21.addLyric(best_finger, nl)
                         else:
-                            _set_fingering(an.chord21, fng)
+                            # a chord appends one fingering per pitch;
+                            # only its first note purges the old ones
+                            _set_fingering(an.chord21, fng,
+                                           replace=an.chordnr == 0)
                 else:
                     if self.lyrics:
                         an.note21.addLyric(best_finger)

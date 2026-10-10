@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from music21 import chord, converter, duration, note, pitch, stream, tempo, tie
+from music21.articulations import Fingering
 
 from pianoplayer.hand import Hand
 from pianoplayer.scorereader import reader
@@ -274,6 +275,31 @@ def test_empty_range_plays_nothing():
     check(h2.fingerseq_index is None, "fresh hand has a non-None index")
     evs = vk._events_for(h2, 1.0, 0.0)
     check(len(evs) == 10, "never-generated hand plays %d of 10" % len(evs))
+
+
+def test_chord_pair_keeps_both_fingers():
+    """A 2-note chord carries one Fingering per pitch, and
+    re-running generate() neither drops nor doubles them."""
+    p = stream.Part()
+    p.insert(0, tempo.MetronomeMark(number=120))
+    for i in range(6):
+        p.insert(i * 1.0, chord.Chord([60 + i, 64 + i],
+                                        quarterLength=1))
+    s = stream.Score()
+    s.insert(0, p)
+    h = make_hand(s)
+
+    def fvals():
+        return [[a.fingerNumber for a in n.chord21.articulations
+                 if isinstance(a, Fingering)] for n in h.noteseq]
+
+    f1 = fvals()
+    check(all(len(f) == 2 for f in f1),
+          "2-note chord lost a finger: %s" % f1[:2])
+    h.generate()
+    check(fvals() == f1, "chord fingering changed on 2nd run")
+    check(all(len(f) == 2 for f in fvals()),
+          "chord fingering doubled")
 
 
 # --------------------------------------------------------------------------- #
