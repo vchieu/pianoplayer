@@ -20,6 +20,7 @@ python test_play.py           # headless 3D-frame smoke test -> ./test_play_out/
 python test_hand_render.py    # offscreen hand poses -> ./test_hand_render/*.png
 python test_shadow.py         # vtkShadowMapPass pipeline sanity
 python test_sound.py          # legacy simpleaudio chord playback
+python test_regression.py     # finger/key/audio/fingering consistency, offscreen, no audio device
 ```
 
 There is no linter, formatter, CI config, or pyproject; `setup.py` is the only
@@ -71,7 +72,9 @@ always land on the physical key that sounds.
 
 **Left hand** is solved by mirroring: `anote.x = -anote.x`, i.e. the left hand
 is treated as a right hand on a mirrored keyboard. All geometry and the
-right-handed skip logic apply unchanged.
+right-handed skip logic apply unchanged. The flip is flagged per note
+(`anote._mirrored`), so `generate()` can run twice on the same
+`noteseq` without mirroring x back.
 
 Hand span (`size` `XXS`..`XXL`) scales `frest` (rest finger positions) by
 `utils.handSizeFactor` (0.33..1.2) and prints the resulting thumb-pinkie span

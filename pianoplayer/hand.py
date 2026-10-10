@@ -178,7 +178,9 @@ class Hand:
 
         if self.LR == "left":
             for anote in self.noteseq:
-                anote.x = -anote.x     # play left as a right on a mirrored keyboard
+                if not getattr(anote, "_mirrored", False):
+                    anote.x = -anote.x  # play left as a right on a mirrored keyboard
+                    anote._mirrored = True   # ...only once: generate() may run again
 
         start_finger, out, vel = 0, [0 for i in range(9)], 0
         N = len(self.noteseq)
