@@ -150,7 +150,7 @@ else: ##########################################################################
     pr.add_argument("-m", "--musescore",   help="Open output in musescore after processing", action="store_true")
     pr.add_argument("-b", "--below-beam",  help="Show fingering numbers below beam line", action="store_true")
     pr.add_argument("-v", "--with-vedo",   help="Play 3D scene after processing", action="store_true")
-    pr.add_argument("--vedo-speed", metavar='', type=float, help="[1] Speed factor of rendering", default=1.5)
+    pr.add_argument("--vedo-speed", metavar='', type=float, help="[1] Playback rate: 1 keeps the score's own tempo", default=1.0)
     pr.add_argument("-z", "--sound-off",   help="Disable sound", action="store_true")
     pr.add_argument("-l", "--left-only",   help="Fingering for left hand only", action="store_true")
     pr.add_argument("-r", "--right-only",  help="Fingering for right hand only", action="store_true")

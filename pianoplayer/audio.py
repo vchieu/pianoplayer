@@ -31,6 +31,7 @@ from __future__ import annotations
 import collections
 import heapq
 import math
+import os
 import queue
 import sys
 import threading
@@ -391,15 +392,23 @@ class _CushionBackend:
     """
 
     CHUNK = 1024            # frames per pre-rendered chunk (~23 ms)
-    CUSHION = 0.30          # ring level the pump aims for (seconds)
+    CUSHION = 0.40          # ring level the pump aims for (seconds)
     BUFFER_MS = 60          # device period.  The device primes a few periods
                             # in one go before playback starts, so this also
                             # sets how much has to be pre-rendered: keep it
                             # well under CUSHION or the priming consumes the
                             # cushion and `_take` has to pad with silence,
                             # which shifts every later sample on the stream.
+    # The OS hands the DAC a whole period before it can start, then mixes.
+    ENGINE_LATENCY = BUFFER_MS / 1000.0 + 0.02
+    # Debug hatch only -- not a CLI flag, not a GUI control.  Different sound
+    # cards report different figures, so PIANOPLAYER_LATENCY_MS lets one
+    # machine be recalibrated without touching the source:
+    #   PIANOPLAYER_LATENCY_MS=120 python bin/pianoplayer scores/x.xml -v
+    ENGINE_LATENCY_OVERRIDE = (
+        float(os.environ["PIANOPLAYER_LATENCY_MS"]) / 1000.0
+        if os.environ.get("PIANOPLAYER_LATENCY_MS") else None)
     IDLE_PUMP = 0.40        # feeder only takes over after this long unserved
-    ENGINE_LATENCY = 0.02   # OS mixer + DAC, on top of any measured gap
 
     def __init__(self, synth: SynthCore, volume_getter):
         self.synth = synth
@@ -429,7 +438,14 @@ class _CushionBackend:
             ring = len(self._chunks) * self.CHUNK + len(self._partial) // 4
             shipped = self.synth.frame - ring    # frames actually handed over
             gap = self._pulled - shipped         # ...vs frames asked for
-        return self.ENGINE_LATENCY + max(gap, 0) / float(self.synth.sr)
+        return self._os_latency + max(gap, 0) / float(self.synth.sr)
+
+    @property
+    def _os_latency(self) -> float:
+        """OS mixer + DAC, overridable for calibration (see the constant)."""
+        if self.ENGINE_LATENCY_OVERRIDE is not None:
+            return self.ENGINE_LATENCY_OVERRIDE
+        return self.ENGINE_LATENCY
 
     # ------------------------------------------------------------- filling
     def _target(self):
@@ -599,10 +615,13 @@ class _SounddeviceBackend(_CushionBackend):
     @property
     def output_latency(self) -> float:
         """Measured gap + what PortAudio itself reports for the stream."""
-        try:
-            reported = float(self.stream.latency)
-        except Exception:
-            reported = self.ENGINE_LATENCY
+        if self.ENGINE_LATENCY_OVERRIDE is not None:
+            reported = self.ENGINE_LATENCY_OVERRIDE
+        else:
+            try:
+                reported = float(self.stream.latency)
+            except Exception:
+                reported = self.ENGINE_LATENCY
         with self._lock:
             ring = len(self._chunks) * self.CHUNK + len(self._partial) // 4
             gap = self._pulled - (self.synth.frame - ring)

@@ -64,11 +64,12 @@ KEY_TOL = 0.12
 FPS_MS = 16               # animation period [ms]
 LEAD_IN = 0.8             # s before the first note: hands settle in place
 AIM_LEAD = 0.25           # s ahead at which the hand aims at the next note
-AUDIO_LOOKAHEAD = 0.75    # s of audio events scheduled in advance: must stay
-                          # above cushion + measured output latency + worst
-                          # frame (0.30 + 0.02 + 0.15), otherwise the note is
-                          # handed over after the synth has already rendered
-                          # past it and gets clamped to "now"
+AUDIO_LOOKAHEAD = 1.0      # s of audio events handed to the synth in advance.
+                          # Must cover device period + mixer (0.08), the primed
+                          # device buffer (4 x 60 ms), the ring cushion (0.40)
+                          # and a stalled frame (0.15) = 0.87; any less and the
+                          # note reaches the synth after it has already
+                          # rendered past it and gets clamped to "now".
 BLACK_AIM = 0.45          # s before a black-key note the hand slides forward
 TAU_PRESS = 0.012         # key/finger easing while pressing [s]
 TAU_RELEASE = 0.032       # ... while releasing [s]
@@ -212,6 +213,7 @@ class VirtualKeyboard:
 
         self.engine = None
         self._audio_epoch = -LEAD_IN   # score time of engine time 0
+        self._underrun_seen = 0        # buffer holes already reported
         self._players = {}
         self._hand_shadows = {}
         self._key_black = {}
@@ -643,6 +645,7 @@ class VirtualKeyboard:
         self._prog = -1.0
         self._hud_t = -1e9
         self._ended = False
+        self._underrun_seen = 0
         self._t0 = _time.time() + LEAD_IN
         # The synth counts seconds from the engine start, the score counts
         # them from _t0, and a sample rendered at engine time t only reaches
@@ -782,6 +785,12 @@ class VirtualKeyboard:
             # while VTK renders and the playback ring would drain (heard as
             # stuttering).  Costs a few ms only when the ring is low.
             engine.pump()
+            seen = engine.underruns
+            if seen != self._underrun_seen:      # report each hole the moment
+                self._underrun_seen = seen       # it happens, with its position
+                if self.verbose:
+                    print("audio: buffer underrun #%d at %+.2f s of score"
+                          % (seen, now))
         for p in self._players.values():
             advance = self._pump(p, now, engine)
 

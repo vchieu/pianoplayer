@@ -116,6 +116,8 @@ def main(fn="scores/bach_invention4.xml", seconds=8.0):
     dt = FPS_MS / 1000.0
     t = -LEAD_IN
     frame_ms, py_ms, gl_ms = [], [], []
+    ring = []                          # (elapsed s, free ring frames)
+    slow = []                          # frames that took > 100 ms
     while t < seconds:
         f0 = time.perf_counter()
         vk._frame(t, dt)
@@ -125,6 +127,10 @@ def main(fn="scores/bach_invention4.xml", seconds=8.0):
         frame_ms.append(1000.0 * (f2 - f0))
         py_ms.append(1000.0 * (f1 - f0))
         gl_ms.append(1000.0 * (f2 - f1))
+        if be is not None:
+            ring.append((time.time() - t0, be._buffered()))
+        if f2 - f0 > 0.10:
+            slow.append((time.time() - t0, 1000.0 * (f2 - f0)))
         tn = time.time() - vk._t0
         dt = tn - t
         if dt <= 0.0 or dt > 0.25:
@@ -162,6 +168,16 @@ def main(fn="scores/bach_invention4.xml", seconds=8.0):
         for when, want in S.get("ur", []):
             print("      underrun at +%.3f s: %d frames of silence"
                   % (when, want))
+        if ring:
+            lv = sorted(r for _, r in ring)
+            print("   free ring: min %.0f ms  p01 %.0f ms  median %.0f ms"
+                  "  (cushion %d ms)"
+                  % (1000.0 * lv[0] / 44100.0, 1000.0 * lv[len(lv) // 100] / 44100.0,
+                     1000.0 * lv[len(lv) // 2] / 44100.0,
+                     int(_CushionBackend.CUSHION * 1000)))
+        if slow:
+            print("   frames > 100 ms: %d   worst %d"
+                  % (len(slow), int(max(ms for _, ms in slow))))
         print("   first takes (+s, frames, ring, underruns, thread):")
         for row in S.get("first", []):
             print("      +%7.3f  n=%-5d ring=%-6d ur=%d  %s" % row)
