@@ -461,13 +461,17 @@ class _CushionBackend:
         with self._lock:
             return len(self._chunks) * self.CHUNK + len(self._partial) // 4
 
-    def pump(self, budget=0.030) -> int:
+    def pump(self, budget=0.060) -> int:
         """
         Render audio ahead from the **calling** thread (the animation loop).
 
         Returns the number of chunks made.  Never blocks: if the fallback
         feeder happens to hold the render lock we simply try again on the
         next frame, which also makes a deadlock impossible.
+
+        The budget is generous on purpose: one slow frame has to be able to
+        refill the whole cushion in a single call, otherwise a stall is
+        turned into a permanent deficit (heard as stuttering).
         """
         self._last_pump = time.time()
         target = self._target()
@@ -738,7 +742,7 @@ class SoundEngine:
         """Seconds between a sample being rendered and being heard."""
         return float(getattr(self._backend, "output_latency", 0.0))
 
-    def pump(self, budget=0.030) -> int:
+    def pump(self, budget=0.060) -> int:
         """
         Render audio into the playback buffer ahead of time.
 

@@ -116,6 +116,11 @@ then:
 ## The 3D Player:
 Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
 
+- **flat top-down view**: the full 88-key keyboard runs along the bottom of the
+  window and the whole area above it is left free for the notes to fall into,
+  the way Synthesia lays it out;
+- **fixed camera**: the view is a locked, orthographic look straight down, so
+  dragging the mouse never moves it; `Esc`/`q` or the close button quits;
 - **procedural hands**: palms, joints, finger pads and nails are built from
   primitives and re-posed every frame by a small analytic IK solver, so the
   fingers arch and flex like real ones and the thumb reaches the black keys;
@@ -123,12 +128,10 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   orange (right hand) or violet (left hand) accent;
 - **tempo comes from the score**: every note - including chords - sounds at
   its exact onset time; `--vedo-speed` scales both animation and sound;
-- **HUD** (bottom left) shows elapsed/total time, current measure and tempo,
-  plus a progress strip on the fallboard;
+- **HUD** (top left) shows elapsed/total time, current measure and tempo,
+  plus a progress strip along the fall line;
 - the built-in synthesiser renders a full polyphonic piano with no samples,
-  panning each hand slightly to its side of the stage;
-- drag with the mouse to orbit, `Middle`/`Right` buttons to pan and zoom;
-  close the window to end the playback.
+  panning each hand slightly to its side of the stage.
 
 
 ## How the algorithm works:

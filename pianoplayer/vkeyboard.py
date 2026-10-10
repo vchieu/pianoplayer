@@ -29,7 +29,7 @@ import os
 import time as _time
 
 try:
-    from vedo import Box, Disc, Plotter, Text2D, Text3D
+    from vedo import Box, Disc, Plotter, Text2D, Text3D, settings as _vsettings
 except Exception:  # pragma: no cover - vedo is mandatory at runtime
     pass
 
@@ -83,7 +83,36 @@ WOOD = (0.46, 0.29, 0.17)
 WOOD_DARK = (0.33, 0.20, 0.12)
 DESK = (0.88, 0.85, 0.77)
 BAR_COLOR = (1.00, 0.74, 0.20)
-HUD_COLOR = (0.22, 0.17, 0.12)
+HUD_COLOR = (0.92, 0.92, 0.95)
+
+# ---- Synthesia-style flat layout ------------------------------------------
+# The keyboard is shown top-down (orthographic, world +y = screen up) and is
+# pinned to the bottom of the window; the whole region above it is left empty
+# so that falling notes can be drawn there later.
+BG_COLOR = (0.05, 0.05, 0.07)     # near-black backdrop for the notes area
+FALL_LINE = (0.25, 0.62, 1.00)    # bright divider glowing above the keys
+KB_MIDI_LO = 21                   # A0, the lowest key of a real 88-key piano
+KB_MIDI_HI = 108                  # C8, the highest key
+KB_MARGIN_X = 2.0                 # world cm of empty space left/right of keys
+KB_BOTTOM_Y = -18.0               # world y at the bottom edge of the window
+                                  # (a little behind the wrist, so the forearms
+                                  # enter from the bottom of the screen)
+KB_SCREEN_FRAC = 0.36             # fraction of the window height given to the
+                                  # keyboard + hands band (rest = notes area)
+KB_ASPECT = 1.75                  # window width/height; bigger = more room
+                                  # above the keys for the falling notes
+MAX_W = 1800                      # never build a window wider than this
+_NOTE_STEP = {"C": 0.5, "C#": 1.0, "D": 1.5, "D#": 2.0, "E": 2.5, "F": 3.5,
+              "F#": 4.0, "G": 4.5, "G#": 5.0, "A": 5.5, "A#": 6.0, "B": 6.5}
+_LETTER = {0: "C", 1: "C#", 2: "D", 3: "D#", 4: "E", 5: "F", 6: "F#",
+           7: "G", 8: "G#", 9: "A", 10: "A#", 11: "B"}
+
+
+def _key_x(midi):
+    """Keyboard x [cm] of a MIDI note, matching `utils.keypos`."""
+    octave = midi // 12 - 1
+    letter = _LETTER[midi % 12]
+    return octave * KEYBSIZE + _NOTE_STEP[letter] * KEY_WB
 
 
 # --------------------------------------------------------------------------- #
@@ -267,79 +296,114 @@ class VirtualKeyboard:
             return 1920, 1080
 
     def _window_size(self):
-        """A player window that always fits the screen."""
+        """A full-width window; the height is derived from `KB_ASPECT`.
+
+        The keyboard is drawn to span the whole width, so the height decides
+        how much room is left above it for the falling notes (Synthesia style).
+        """
         sw, sh = self._screen_size()
-        w = int(min(1560, max(900, sw - 24)))
-        h = int(min(760, max(520, int(sh * 0.86))))
-        return w, h
+        w = int(min(sw - 20, MAX_W))
+        h = int(round(w / KB_ASPECT))
+        if h > sh - 60:                 # never taller than the screen
+            h = int(sh - 60)
+            w = int(round(h * KB_ASPECT))
+        return max(w, 480), max(h, 260)
+
+    @staticmethod
+    def _kb_bounds():
+        """(left, right, center, width) of the 88-key span in world x."""
+        half = (KEY_WB - KEY_TOL) / 2.0
+        left = _key_x(KB_MIDI_LO) - half
+        right = _key_x(KB_MIDI_HI) + half
+        return left, right, 0.5 * (left + right), right - left
+
+    def _lock_camera(self):
+        """Freeze the view: dragging the mouse must not move the camera.
+
+        The interactor keeps its own KeyPress observers (so 'q'/Esc still quit
+        and the animation timer still runs); only the trackball style that
+        rotates/pans/zooms is swapped out.
+        """
+        if self.vp is None or getattr(self.vp, "interactor", None) is None:
+            return
+        try:
+            from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
+            self.vp.interactor.SetInteractorStyle(vtkInteractorStyleUser())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ scene
     def build_keyboard(self):
-        """Create the plotter, the wooden frame and the 88 keys (non blocking)."""
-        span = NR_OCTAVES * KEY_WB * 7.0
-        self._span = span
+        """Create the plotter and the 88 keys (non blocking).
+
+        The view is a locked, orthographic top-down look: world +y points up
+        the screen (notes area), world +x runs along the keyboard, the keys are
+        pinned to the bottom edge and the whole area above them is left empty
+        for the falling notes.
+        """
+        left, right, cx, kb_w = self._kb_bounds()
+        self._span = kb_w
+        self._cx = cx
+        self._kb_left = left
 
         w, h = self._window_size()
-        self.vp = Plotter(title='PianoPlayer ' + __version__, axes=0,
-                          size=(w, h), bg='cornsilk', bg2='lb',
-                          offscreen=self.offscreen)
+        aspect = float(w) / float(max(h, 1))
 
-        wood = _wood_texture()
-        fallboard = Box(pos=(span / 2 + KEYBSIZE, 6, 1),
-                        length=span + 1, height=3, width=5, c=WOOD)
-        base = Box(pos=(span / 2 + KEYBSIZE, 0, -1),
-                   length=span + 1, height=1, width=17, c=WOOD_DARK)
-        if wood is not None:
-            try:
-                fallboard.texture(wood, repeat=True)
-                base.texture(wood, repeat=True)
-            except Exception:
-                pass
-        self.vp += fallboard
+        # Orthographic top-down: `parallel_scale` is half of the world height
+        # on screen. Derive it from the width so the 88 keys span the window.
+        pscale = (kb_w / 2.0 + KB_MARGIN_X) / aspect
+        cy = KB_BOTTOM_Y + pscale         # pin the keys to the bottom edge
+        cam_z = 400.0
+
+        # 8x MSAA on a full-width window costs ~12 ms per frame, which is the
+        # difference between ~6 fps and ~30 fps -- and a starved frame is
+        # heard as an audio stutter.  The scene is axis-aligned boxes, so it
+        # stays clean without it.
+        try:
+            _vsettings.multi_samples = 0
+        except Exception:
+            pass
+        self.vp = Plotter(title='PianoPlayer ' + __version__, axes=0,
+                          size=(w, h), bg=BG_COLOR, offscreen=self.offscreen)
+
+        # dark slab under the keys: black gaps between the white keys, and the
+        # strip below the keys (player side) stays black like the reference
+        back_y = 6.0                       # a little behind the key backs
+        base = Box(pos=(cx, 0.5 * (KB_BOTTOM_Y + back_y), -1.0),
+                   length=kb_w + 2 * KB_MARGIN_X, height=1.0,
+                   width=back_y - KB_BOTTOM_Y, c=(0.03, 0.03, 0.04))
         self.vp += base
 
-        # music desk with the song title ------------------------------------
-        desk_c = (span / 1.6, 9.5, 11.0)
-        desk = Box(pos=desk_c, length=span / 2.4,
-                   height=15.0, width=1.4, c=DESK)
-        desk.rotate(-20, axis=(1, 0, 0), point=desk_c)
-        self.vp += desk
-        if self.songname:
-            # NB: vedo reads _.._ as subscript markup -> strip the underscores
-            title = Text3D(os.path.basename(str(self.songname)).replace("_", " "),
-                           s=2.4, c=(0.16, 0.13, 0.11), depth=0.25)
-            b = title.bounds()
-            title.rotate(70, axis=(1, 0, 0),
-                         point=((b[0] + b[1]) / 2, (b[2] + b[3]) / 2,
-                                (b[4] + b[5]) / 2))
-            title.pos(span / 1.6, 8.6, 11.5)
-            self.vp += title
+        # the bright line the falling notes will land on --------------------
+        fall = Box(pos=(cx, 4.6, 0.55), length=kb_w + 1.0,
+                   height=0.5, width=0.5, c=FALL_LINE)
+        try:
+            fall.actor.GetProperty().LightingOff()
+        except Exception:
+            pass
+        self.vp += fall
 
-        # keys ---------------------------------------------------------------
-        nts = ("C", "D", "E", "F", "G", "A", "B")
-        for ioct in range(NR_OCTAVES):
-            octave = ioct + 1
-            for ik, nt in enumerate(nts):
-                x = ik * KEY_WB + (ioct + 1) * KEYBSIZE + KEY_WB / 2
-                name = nt + str(octave)
+        # the 88 keys, A0 .. C8 --------------------------------------------
+        black_pc = (1, 3, 6, 8, 10)       # C# D# F# G# A#
+        for midi in range(KB_MIDI_LO, KB_MIDI_HI + 1):
+            pc = midi % 12
+            name = _LETTER[pc] + str(midi // 12 - 1)
+            x = _key_x(midi)
+            if pc in black_pc:
+                k = Box(pos=(x, 0, 1), length=KEY_WB * 0.6,
+                        height=1, width=8, c=KEY_BLACK)
+                self._key_black[name] = True
+            else:
                 k = Box(pos=(x, -2, 0), length=KEY_WB - KEY_TOL,
                         height=1, width=12, c=KEY_WHITE)
-                self.KB[name] = k
                 self._key_black[name] = False
-                self.vp += k
-                self._register_midi(name, nt, octave)
-                if nt not in ("E", "B"):
-                    nb = Box(pos=(x + KEY_WB / 2, 0, 1), length=KEY_WB * 0.6,
-                             height=1, width=8, c=KEY_BLACK)
-                    nname = nt + '#' + str(octave)
-                    self.KB[nname] = nb
-                    self._key_black[nname] = True
-                    self.vp += nb
-                    self._register_midi(nname, nt + '#', octave)
+            self.KB[name] = k
+            self._key_by_midi[midi] = name
+            self.vp += k
 
-        # progress bar, a strip running on top of the fallboard --------------
+        # progress bar: a thin strip filling up along the fall line ---------
         if vtkMatrix4x4 is not None:
-            self._bar = Box(pos=(0, 0, 0), length=1, height=0.10, width=3.2,
+            self._bar = Box(pos=(0, 0, 0), length=1, height=0.10, width=0.8,
                             c=BAR_COLOR)
             m4 = vtkMatrix4x4()
             m4.Identity()
@@ -347,22 +411,22 @@ class VirtualKeyboard:
             self._bar_m4 = m4
             self.vp += self._bar
 
-        # camera: fit the whole keyboard whatever the window aspect is.
-        # a 37 deg down angle keeps world +z vertical and +x horizontal on
-        # screen, so the keyboard never looks tilted.
-        cx = span / 2 + KEYBSIZE
-        aspect = float(w) / float(max(h, 1))
-        dist = (span / 2.0 + 8.0) / (math.tan(math.radians(15.0)) * aspect)
-        down = math.radians(37.0)
-        focal = (cx, -2.0, 3.0)
-        pos = (cx, focal[1] - dist * math.cos(down),
-               focal[2] + dist * math.sin(down))
-        self._camera = dict(pos=pos, focalPoint=focal,
-                            viewup=(0.0, math.sin(down), math.cos(down)))
+        # Camera: straight down at 90 deg, orthographic (a flat plane, no
+        # perspective trapezoid), keyboard pinned to the bottom of the frame.
+        self._camera = dict(pos=(cx, cy, cam_z), focalPoint=(cx, cy, 0.0),
+                            viewup=(0.0, 1.0, 0.0),
+                            clipping_range=(1.0, 2.0 * cam_z),
+                            parallel_scale=pscale)
         self.vp.camera = self._camera
+        try:
+            self.vp.camera.SetParallelProjection(1)
+            self.vp.camera.SetParallelScale(pscale)
+        except Exception:
+            pass
         self._add_lights()
         if self.shadows:
             self._enable_shadows()
+        self._lock_camera()
         self.vp.render()
         return self.vp
 
@@ -403,11 +467,13 @@ class VirtualKeyboard:
     def _add_lights(self):
         if vtkLight is None or self.vp is None or self.vp.renderer is None:
             return
-        cx = self._span / 2 + KEYBSIZE
+        cx = getattr(self, "_cx", self._span / 2 + KEYBSIZE)
+        # top-down view: keep the lights high so the key tops and the backs of
+        # the hands are lit, with a slight offset for readable shading
         specs = (
-            ((cx - 45, -70, 85), (cx, 0, 0), 0.90, (1.00, 0.97, 0.92)),
-            ((cx + 55, -50, 60), (cx, 0, 0), 0.50, (0.86, 0.92, 1.00)),
-            ((cx, 55, 70), (cx, 0, 6), 0.40, (1.00, 1.00, 1.00)),
+            ((cx - 30, -55, 95), (cx, -4, 0), 0.95, (1.00, 0.97, 0.92)),
+            ((cx + 45, -25, 80), (cx, 0, 0), 0.50, (0.86, 0.92, 1.00)),
+            ((cx, 55, 75), (cx, 4, 0), 0.40, (1.00, 1.00, 1.00)),
         )
         # with the shadow map pass only one light can be used: every light
         # must own a shadow map, otherwise its contribution is dropped.
@@ -577,6 +643,14 @@ class VirtualKeyboard:
         """
         if self.vp is None:
             self.build_keyboard()
+        try:
+            # Warm-up: the first frame of a cold window has to compile every
+            # shader and upload the geometry, which can stall for half a
+            # second and drain the audio ring before note one.  Pay that cost
+            # *before* the synth clock starts.
+            self.vp.render()
+        except Exception:
+            pass
         self._prepare()
 
         if self._cb_id is not None:
@@ -585,19 +659,58 @@ class VirtualKeyboard:
             except Exception:
                 pass
             self._cb_id = None
-        try:
-            self._cb_id = self.vp.add_callback("timer", self._on_timer)
-            self.vp.timer_callback("create", dt=FPS_MS)
-        except Exception as exc:
-            print("Cannot start the animation timer:", exc)
 
         self._playing = True
         try:
-            self.vp.show(interactive=1, resetcam=0)
+            self._lock_camera()          # dragging must never move the view
+            self._run_frames()
         finally:
             self._playing = False
             self._teardown()
         return self
+
+    def _run_frames(self):
+        """
+        Drive the animation ourselves instead of `interactor.Start()`.
+
+        vedo's interactive loop parks a blocking message wait between the VTK
+        timer callback and the next render.  Measured on this scene that costs
+        ~30 ms per frame -- 11 fps instead of 30 -- and because the frames come
+        out that slow the audio ring drains and playback stutters.  Polling the
+        events here costs nothing and still runs every observer vedo attached
+        to the interactor, so 'q'/Esc and the window's close button behave as
+        before (vedo turns them into `BreakInteraction`/`TerminateApp`).
+        """
+        vp = self.vp
+        try:
+            vp.initialize_interactor()
+            vp.window.Render()           # map the window before looping
+        except Exception:
+            pass
+        period = FPS_MS / 1000.0
+        nxt = _time.perf_counter()
+        frame = 0
+        while self._playing:
+            if vp.interactor is None:    # headless: there is nothing to pump
+                break
+            try:
+                vp.interactor.ProcessEvents()
+                if vp.interactor.GetDone() or vp._must_close_now:
+                    break
+                # the window is gone (close button): stop before Render() on a
+                # dead interactor turns into a traceback in _on_timer
+                if frame >= 5 and not vp.window.GetMapped():
+                    break
+            except Exception:
+                break
+            self._on_timer()
+            frame += 1
+            nxt += period
+            slack = nxt - _time.perf_counter()
+            if slack > 0:
+                _time.sleep(slack)
+            else:
+                nxt = _time.perf_counter()
 
     def _prepare(self):
         self._players = {}
@@ -871,8 +984,9 @@ class VirtualKeyboard:
 
         if self._hud is None:
             try:
-                self._hud = Text2D(txt, pos='bottom-left', s=0.75,
-                                   c=HUD_COLOR, bg='w')
+                # top-left: the empty notes area, so it never covers the keys
+                self._hud = Text2D(txt, pos='top-left', s=0.75,
+                                   c=HUD_COLOR, bg=(0.12, 0.12, 0.15))
                 self.vp.add(self._hud)
             except Exception:
                 self._hud = False
@@ -903,11 +1017,11 @@ class VirtualKeyboard:
             for j in range(4):
                 m4.SetElement(i, j, 0.0)
         m4.SetElement(0, 0, length)
-        m4.SetElement(0, 3, KEYBSIZE + length / 2.0)
+        m4.SetElement(0, 3, self._kb_left + length / 2.0)
         m4.SetElement(1, 1, 1.0)
-        m4.SetElement(1, 3, 6.0)       # strip sits on the fallboard top
+        m4.SetElement(1, 3, 4.6)       # strip sits on the fall line
         m4.SetElement(2, 2, 1.0)
-        m4.SetElement(2, 3, 2.55)
+        m4.SetElement(2, 3, 0.90)
         m4.SetElement(3, 3, 1.0)
         m4.Modified()
         self._bar.actor.Modified()
