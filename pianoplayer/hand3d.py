@@ -90,24 +90,38 @@ _FOREARM = ((0.0, -46.0, 0.55), (0.0, -2.0, 0.55), 1.95)
 # --------------------------------------------------------------------------- #
 def _frame_from_dir(d, up=(0.0, 0.0, 1.0)):
     """Orthonormal frame whose +y axis is `d` and whose +z axis is as close
-    as possible to `up` (used to orient phalanges, pads and nails)."""
-    y = np.asarray(d, dtype=float)
-    n = float(np.linalg.norm(y))
+    as possible to `up` (used to orient phalanges, pads and nails).
+
+    Returns a 3x3 nested tuple, laid out like ``np.column_stack((x, y, z))``
+    i.e. ``out[i][j]`` = i-th component of the j-th axis.  Plain floats are
+    used on purpose: this is called 30 times per frame and numpy's function
+    call overhead used to dominate the whole animation loop."""
+    dx, dy, dz = float(d[0]), float(d[1]), float(d[2])
+    n = math.sqrt(dx * dx + dy * dy + dz * dz)
     if n < 1e-9:
-        y = np.array([0.0, 1.0, 0.0])
+        dx, dy, dz = 0.0, 1.0, 0.0
     else:
-        y = y / n
-    x = np.cross(y, np.asarray(up, dtype=float))
-    nx = float(np.linalg.norm(x))
+        dx, dy, dz = dx / n, dy / n, dz / n
+
+    ux, uy, uz = float(up[0]), float(up[1]), float(up[2])
+    xx = dy * uz - dz * uy                 # x = y x up
+    xy = dz * ux - dx * uz
+    xz = dx * uy - dy * ux
+    nx = math.sqrt(xx * xx + xy * xy + xz * xz)
     if nx < 1e-6:
-        for aux in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
-            x = np.cross(y, np.asarray(aux, dtype=float))
-            nx = float(np.linalg.norm(x))
+        for ax, ay, az in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
+            xx = dy * az - dz * ay
+            xy = dz * ax - dx * az
+            xz = dx * ay - dy * ax
+            nx = math.sqrt(xx * xx + xy * xy + xz * xz)
             if nx > 1e-6:
                 break
-    x = x / nx
-    z = np.cross(x, y)
-    return np.column_stack((x, y, z))
+    xx, xy, xz = xx / nx, xy / nx, xz / nx
+
+    zx = xy * dz - xz * dy                 # z = x x y
+    zy = xz * dx - xx * dz
+    zz = xx * dy - xy * dx
+    return ((xx, dx, zx), (xy, dy, zy), (xz, dz, zz))
 
 
 def _rot_x(a):
@@ -125,6 +139,10 @@ def _rot_z(a):
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
 
 
+# identity, as a nested tuple (same layout as `_frame_from_dir` output)
+_EYE = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+
 def solve_chain(base, target, lens, pole, bend_max=1.75, coupling=0.4):
     """
     Analytic 3-segment IK.
@@ -133,28 +151,37 @@ def solve_chain(base, target, lens, pole, bend_max=1.75, coupling=0.4):
     target is inside reach (otherwise the closest reachable point).  The
     chain bends toward `pole`, PIP bending by ``b1`` and DIP by ``coupling*b1``.
     """
-    v = np.asarray(target, dtype=float) - np.asarray(base, dtype=float)
-    d = float(np.linalg.norm(v))
+    bx, by, bz = float(base[0]), float(base[1]), float(base[2])
+    vx = float(target[0]) - bx
+    vy = float(target[1]) - by
+    vz = float(target[2]) - bz
+    d = math.sqrt(vx * vx + vy * vy + vz * vz)
     if d < 1e-9:
-        v = np.asarray(pole, dtype=float)
-        d = float(np.linalg.norm(v))
+        vx, vy, vz = float(pole[0]), float(pole[1]), float(pole[2])
+        d = math.sqrt(vx * vx + vy * vy + vz * vz)
         if d < 1e-9:
-            v = np.array([0.0, 1.0, 0.0])
-            d = 1.0
-    u = v / d
+            vx, vy, vz, d = 0.0, 1.0, 0.0, 1.0
+    ux, uy, uz = vx / d, vy / d, vz / d
 
     # pole, orthogonalised against the chord -> in-plane "up" direction
-    p = np.asarray(pole, dtype=float)
-    p = p - float(np.dot(p, u)) * u
-    n = float(np.linalg.norm(p))
+    px, py, pz = float(pole[0]), float(pole[1]), float(pole[2])
+    dp = px * ux + py * uy + pz * uz
+    px -= dp * ux
+    py -= dp * uy
+    pz -= dp * uz
+    n = math.sqrt(px * px + py * py + pz * pz)
     if n < 1e-6:
-        aux = (1.0, 0.0, 0.0) if abs(u[0]) < 0.9 else (0.0, 1.0, 0.0)
-        p = np.cross(u, np.asarray(aux, dtype=float))
-        n = float(np.linalg.norm(p))
+        if abs(ux) < 0.9:
+            ax, ay, az = 1.0, 0.0, 0.0
+        else:
+            ax, ay, az = 0.0, 1.0, 0.0
+        px = uy * az - uz * ay
+        py = uz * ax - ux * az
+        pz = ux * ay - uy * ax
+        n = math.sqrt(px * px + py * py + pz * pz)
         if n < 1e-6:
-            p = np.array([0.0, 0.0, 1.0])
-            n = 1.0
-    w = p / n
+            px, py, pz, n = 0.0, 0.0, 1.0, 1.0
+    wx, wy, wz = px / n, py / n, pz / n
 
     l1, l2, l3 = lens
 
@@ -190,9 +217,10 @@ def solve_chain(base, target, lens, pole, bend_max=1.75, coupling=0.4):
     for q in ((0.0, 0.0), p1, p2, p3):
         x = q[0] * c - q[1] * s
         y = q[0] * s + q[1] * c
-        pts.append(x * u + y * w)
-    b = np.asarray(base, dtype=float)
-    return [b + q for q in pts]
+        pts.append((bx + x * ux + y * wx,
+                    by + x * uy + y * wy,
+                    bz + x * uz + y * wz))
+    return pts
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +326,11 @@ class HandRig:
                   0.5 * (radii[2] + radii[3])]
             pad_long = radii[3] * 1.25
             distal_len = max(0.4, lens[2] - 0.35 * pad_long)
-            self._geom[f] = dict(lens=lens, radii=radii, sr=sr, pad_long=pad_long)
+            self._geom[f] = dict(lens=lens, radii=radii, sr=sr, pad_long=pad_long,
+                                 base_local=self._L(spec["base"]),
+                                 pole_local=np.array([spec["pole"][0] * self.s,
+                                                      spec["pole"][1],
+                                                      spec["pole"][2]]))
 
             self.seg[f] = [
                 self._place(Cylinder(pos=[(0, 0, 0), (0, lens[0], 0)], r=sr[0],
@@ -333,17 +365,25 @@ class HandRig:
     # ---------------------------------------------------------------- update
     @staticmethod
     def _set(mesh, R, t):
+        """Copy a 3x3 rotation + translation into the mesh's rig matrix.
+
+        `R` is either a numpy 3x3 or a nested tuple (see `_frame_from_dir`);
+        both index the same way.  The unrolled setters keep this off the hot
+        path -- it runs ~90x per frame."""
         m = mesh._rig_matrix
-        R = np.asarray(R, dtype=float)
-        t = np.asarray(t, dtype=float)
-        for i in range(3):
-            m.SetElement(i, 0, float(R[i, 0]))
-            m.SetElement(i, 1, float(R[i, 1]))
-            m.SetElement(i, 2, float(R[i, 2]))
-            m.SetElement(i, 3, float(t[i]))
-        m.SetElement(3, 0, 0.0)
-        m.SetElement(3, 1, 0.0)
-        m.SetElement(3, 2, 0.0)
+        r0, r1, r2 = R[0], R[1], R[2]
+        m.SetElement(0, 0, r0[0])
+        m.SetElement(0, 1, r0[1])
+        m.SetElement(0, 2, r0[2])
+        m.SetElement(0, 3, t[0])
+        m.SetElement(1, 0, r1[0])
+        m.SetElement(1, 1, r1[1])
+        m.SetElement(1, 2, r1[2])
+        m.SetElement(1, 3, t[1])
+        m.SetElement(2, 0, r2[0])
+        m.SetElement(2, 1, r2[1])
+        m.SetElement(2, 2, r2[2])
+        m.SetElement(2, 3, t[2])
         m.SetElement(3, 3, 1.0)
         m.Modified()
         mesh.actor.Modified()
@@ -431,32 +471,41 @@ class HandRig:
             if t is None:
                 continue
             x, y, z, a = t
-            spec = _SPECS[f]
             g = self._geom[f]
-            base = self.root + R @ self._L(spec["base"])
-            pole = R @ np.array([spec["pole"][0] * self.s,
-                                 spec["pole"][1], spec["pole"][2]])
+            base = self.root + R @ g["base_local"]
+            pole = R @ g["pole_local"]
             q0, q1, q2, q3 = solve_chain(base, (x, y, z), g["lens"], pole,
                                          self.BEND_MAX, self.COUPLING)
 
-            f0 = _frame_from_dir(q1 - q0)
-            f1 = _frame_from_dir(q2 - q1)
-            f2 = _frame_from_dir(q3 - q2)
-            eye = np.eye(3)
+            d01 = (q1[0] - q0[0], q1[1] - q0[1], q1[2] - q0[2])
+            d12 = (q2[0] - q1[0], q2[1] - q1[1], q2[2] - q1[2])
+            d23 = (q3[0] - q2[0], q3[1] - q2[1], q3[2] - q2[2])
+            f0 = _frame_from_dir(d01)
+            f1 = _frame_from_dir(d12)
+            f2 = _frame_from_dir(d23)
 
             self._set(self.seg[f][0], f0, q0)
             self._set(self.seg[f][1], f1, q1)
             self._set(self.seg[f][2], f2, q2)
-            self._set(self.jnt[f][0], eye, q0)
-            self._set(self.jnt[f][1], eye, q1)
-            self._set(self.jnt[f][2], eye, q2)
+            self._set(self.jnt[f][0], _EYE, q0)
+            self._set(self.jnt[f][1], _EYE, q1)
+            self._set(self.jnt[f][2], _EYE, q2)
 
-            d3 = q3 - q2
-            n3 = float(np.linalg.norm(d3))
-            dir3 = d3 / n3 if n3 > 1e-9 else np.array([0.0, 1.0, 0.0])
-            self._set(self.pad[f], f2, q3 - dir3 * (0.85 * g["pad_long"]))
-            nail = q2 + dir3 * (0.5 * g["lens"][2]) + f2[:, 2] * (0.88 * g["sr"][2])
-            self._set(self.nail[f], f2, nail)
+            n3 = math.sqrt(d23[0] * d23[0] + d23[1] * d23[1] + d23[2] * d23[2])
+            if n3 > 1e-9:
+                dir3 = (d23[0] / n3, d23[1] / n3, d23[2] / n3)
+            else:
+                dir3 = (0.0, 1.0, 0.0)
+            pl = 0.85 * g["pad_long"]
+            self._set(self.pad[f], f2, (q3[0] - dir3[0] * pl,
+                                        q3[1] - dir3[1] * pl,
+                                        q3[2] - dir3[2] * pl))
+            sl = 0.5 * g["lens"][2]
+            nz = 0.88 * g["sr"][2]
+            self._set(self.nail[f], f2,
+                      (q2[0] + dir3[0] * sl + f2[0][2] * nz,
+                       q2[1] + dir3[1] * sl + f2[1][2] * nz,
+                       q2[2] + dir3[2] * sl + f2[2][2] * nz))
             self._tint(f, a)
 
     # --------------------------------------------------------------- helpers
