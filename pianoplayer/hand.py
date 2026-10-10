@@ -9,6 +9,14 @@ from music21.articulations import Fingering
 import pianoplayer.utils as utils
 
 
+def _set_fingering(n21, fng):
+    """Attach a Fingering articulation, replacing any previous one:
+    re-running generate() must not double the annotation."""
+    for a in [a for a in n21.articulations if isinstance(a, Fingering)]:
+        n21.articulations.remove(a)
+    n21.articulations.append(fng)
+
+
 #####################################################
 class Hand:
     def __init__(self, side="right", size='M'):
@@ -20,6 +28,7 @@ class Hand:
         self.bfactor   = [None,   0.3, 1.0, 1.1, 0.8, 0.7] # hit of black key bias
         self.noteseq   = []
         self.fingerseq = []
+        self.fingerseq_index = None  # list (maybe empty) once generate() ran
         self.depth     = 9
         self.autodepth = True
         self.verbose   = True
@@ -183,6 +192,7 @@ class Hand:
                     anote._mirrored = True   # ...only once: generate() may run again
 
         start_finger, out, vel = 0, [0 for i in range(9)], 0
+        entry_autodepth, entry_depth = self.autodepth, self.depth
         N = len(self.noteseq)
         if self.depth < 3: self.depth = 3
         if self.depth > 9: self.depth = 9
@@ -241,12 +251,12 @@ class Hand:
                             nl = len(an.chord21.pitches) - an.chordnr
                             an.chord21.addLyric(best_finger, nl)
                         else:
-                            an.chord21.articulations.append(fng)
+                            _set_fingering(an.chord21, fng)
                 else:
                     if self.lyrics:
                         an.note21.addLyric(best_finger)
                     else:
-                        an.note21.articulations.append(fng)
+                        _set_fingering(an.note21, fng)
 
             #---------------------------------------------------------------------------- print
             if self.verbose:
@@ -265,6 +275,13 @@ class Hand:
                 if i and not i%100 and an.measure:
                     print('scanned', i, '/', N,
                           'notes, measure', an.measure+1, ' for the', self.LR ,'hand...')
+
+        # Restore the depth settings the caller had on entry: the scan
+        # forces depth 9 on its last stretch, and leaving that behind
+        # would make a second generate() solve other depths and find a
+        # different fingering for the same notes.
+        self.autodepth = entry_autodepth
+        self.depth = entry_depth
 
 
 

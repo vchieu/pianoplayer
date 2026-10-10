@@ -73,8 +73,9 @@ always land on the physical key that sounds.
 **Left hand** is solved by mirroring: `anote.x = -anote.x`, i.e. the left hand
 is treated as a right hand on a mirrored keyboard. All geometry and the
 right-handed skip logic apply unchanged. The flip is flagged per note
-(`anote._mirrored`), so `generate()` can run twice on the same
-`noteseq` without mirroring x back.
+(`anote._mirrored`), `generate()` restores its entry depth settings and
+replaces (not appends) the `Fingering` articulation, so `generate()`
+can run twice on the same `noteseq` and reproduces the same fingering.
 
 Hand span (`size` `XXS`..`XXL`) scales `frest` (rest finger positions) by
 `utils.handSizeFactor` (0.33..1.2) and prints the resulting thumb-pinkie span

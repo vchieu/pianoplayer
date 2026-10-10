@@ -222,16 +222,24 @@ def test_audio_epoch_tracks_latency():
 
 
 def test_left_mirror_idempotent():
-    """Left-hand mirroring must be idempotent: generate() called twice on the
-    same noteseq must not flip x back (the flag lives on each INote)."""
+    """generate() called twice on the same noteseq must keep
+    x mirrored, give the same fingering and not double the
+    Fingering annotation."""
+    # slow notes: the first run picks its window depth with
+    # autodepth, so this proves a second run reproduces it
     names = ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5", "D5", "E5"]
-    sf = make_score(names, ql=0.5, hold=0.5)
+    sf = make_score(names, ql=1.0, hold=1.0, bpm=60)
     h = make_hand(sf, "left")
     x1 = [n.x for n in h.noteseq]
+    f1 = [n.fingering for n in h.noteseq]
     check(all(v < 0 for v in x1), "left hand x not mirrored: %s" % x1[:3])
     h.generate()
     x2 = [n.x for n in h.noteseq]
+    f2 = [n.fingering for n in h.noteseq]
     check(x1 == x2, "generate() flipped x twice: %s -> %s" % (x1[:3], x2[:3]))
+    check(f1 == f2, "fingering changed on 2nd run: %s -> %s" % (f1, f2))
+    check(all(len(n.note21.articulations) == 1 for n in h.noteseq),
+          "Fingering annotation doubled")
     vk = make_vk([])
     evs = vk._events_for(h, -1.0, 0.0)
     check(len(evs) == len(names), "%d events" % len(evs))
@@ -239,6 +247,33 @@ def test_left_mirror_idempotent():
         check(abs(e.wx - _key_x(e.midi)) < 1e-6,
               "left: %s midi %d: wx %.2f != key x %.2f"
               % (e.name, e.midi, e.wx, _key_x(e.midi)))
+
+
+def test_empty_range_plays_nothing():
+    """A generated-but-empty range (-s past the end) plays no
+    note, while a never-generated hand still plays everything."""
+    # the -s / -n range is measured in measure numbers, so the
+    # notes must live in real Measures
+    p = stream.Part()
+    p.insert(0, tempo.MetronomeMark(number=120))
+    for mnum in range(1, 6):
+        m = stream.Measure(number=mnum)
+        for i in range(2):
+            m.append(note.Note(60 + (mnum + i) % 5, quarterLength=0.5))
+        p.append(m)
+    sf = stream.Score()
+    sf.insert(0, p)
+    h = make_hand(sf, start=1000)          # no note in the range
+    check(h.fingerseq_index == [], "empty range left a non-empty index")
+    vk = make_vk([])
+    check(vk._events_for(h, 1.0, 0.0) == [], "empty range still plays")
+
+    h2 = Hand("right", "M")
+    h2.verbose = False
+    h2.noteseq = reader(sf, beam=0)        # generate() never ran
+    check(h2.fingerseq_index is None, "fresh hand has a non-None index")
+    evs = vk._events_for(h2, 1.0, 0.0)
+    check(len(evs) == 10, "never-generated hand plays %d of 10" % len(evs))
 
 
 # --------------------------------------------------------------------------- #

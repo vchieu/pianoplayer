@@ -540,9 +540,12 @@ class VirtualKeyboard:
         # map noteseq index -> fan row (generate() may have processed only a
         # subset of the notes, e.g. when a measure range was requested)
         fan_of = {}
-        idxs = list(getattr(hand, "fingerseq_index", []) or [])
-        played = set(idxs) if idxs else None   # None = Hand never generated
-        if fseq and len(idxs) == len(fseq):
+        # fingerseq_index stays None until generate() runs (and is an
+        # empty list when the -n / -s range held no note): only a
+        # never-generated hand falls back to playing every note.
+        idxs = getattr(hand, "fingerseq_index", None)
+        played = set(idxs) if idxs is not None else None
+        if idxs and fseq and len(idxs) == len(fseq):
             fan_of = {i2: row for i2, row in zip(idxs, fseq)}
         elif len(fseq) == len(nseq) and fseq:
             fan_of = dict(enumerate(fseq))
