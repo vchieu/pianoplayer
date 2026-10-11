@@ -375,6 +375,13 @@ class VirtualKeyboard:
                 self.vp.camera.SetParallelScale(cam.get("parallel_scale"))
         except Exception:
             pass
+        # H3: blob shadows only make sense in the top-down ortho view.
+        try:
+            for rig in (getattr(self, "RH", None), getattr(self, "LH", None)):
+                if rig is not None:
+                    rig.set_shadows_visible(not self._view_persp)
+        except Exception:
+            pass
         return self._view_persp
 
     # ------------------------------------------------------------------ scene
@@ -410,6 +417,14 @@ class VirtualKeyboard:
             pass
         self.vp = Plotter(title='PianoPlayer ' + __version__, axes=0,
                           size=(w, h), bg=BG_COLOR, offscreen=self.offscreen)
+
+        # H4: cheap anti-aliasing (multi_samples stays 0: 8x MSAA costs
+        # ~12 ms/frame).  Guarded: old VTK has no FXAA entry point.
+        try:
+            self.vp.renderer.UseFXAAOn()
+            self._fxaa = True
+        except Exception:
+            self._fxaa = False
 
         # dark slab under the keys: black gaps between the white keys, and the
         # strip below the keys (player side) stays black like the reference
@@ -1084,7 +1099,8 @@ class VirtualKeyboard:
                         newv = tgt
                     p.press[f] = newv
 
-            p.rig.update(dt, p.finger_x, p.press, advance_black=advance)
+            p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
+                         held={f for f in FINGERS if p.active.get(f)})
 
         self._sync_keys(dt)
         self._hud_update(now)

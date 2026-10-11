@@ -23,6 +23,7 @@ python test_sound.py          # legacy simpleaudio chord playback
 python test_regression.py     # finger/key/audio/fingering consistency, offscreen, no audio device
 python test_fingering.py      # fingering validity (fingers 1..5, held-finger, chord order) + 500-note solve time
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
+python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend, offscreen
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
 ```
 
@@ -37,6 +38,7 @@ build manifest.
 | `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
 | `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`) |
+| `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
 | `pianoplayer/utils.py` | Keyboard geometry, note-name helpers, shared constants |
@@ -167,28 +169,34 @@ anywhere in the `_t0` family).
 cold-start stall cannot drain the audio ring before note one (`_run_frames`
 initialises nothing).
 
-`hand3d.py` builds the hand from three draw calls (lofted arm+palm, five tapered
-finger tubes, five nail ellipsoids) and re-poses them every frame with an
-analytic 3-segment IK (`solve_chain`, also returns bend `b1`): MCP->PIP->DIP chain, PIP bends by `b1`,
+`hand3d.py` builds each hand from a lofted arm+palm surface, five tapered
+finger tubes re-posed every frame with an analytic 3-segment IK
+(`solve_chain`, also returns bend `b1`): MCP->PIP->DIP chain, PIP bends by `b1`,
 DIP by `COUPLING * b1`, bisection on the chord length so the tip lands exactly
 on the key. `update()` records per-finger `tip_err`/`max_bend`. Faces are wound
 **inward** on purpose -- VTK would otherwise treat
 outer faces as back-facing and shade them black; the left hand mirrors and
 reverses face winding again for the same reason. The forearm yaws outward
-around the wrist (`yaw_arm = atan2(root_x - shoulder_x, 45)`, clamped
-±0.45 rad, added to the velocity yaw).
+around the wrist (`0.4 * atan2(root_x - shoulder_x, 45)`, clamped
+±0.10 rad, plus velocity yaw clamped ±0.05).
 
 Root follows hand size: `ROOT_Y`/`ROOT_Z` scale with `hf` (reach fraction
 0.69, `ROOT_Z = 2.0*(0.50+0.60*hf)`, `BLACK_SHIFT = 1.15`), the thumb MCP
 moves forward with `hf` and the pinky contact retreats 0.80 cm
 (`_PINKY_CONTACT_DY`). Palm/arm loft uses the `_ARM` stations with a
 `_THENAR = 0.50` thumb-side bulge and a static thenar-web ellipsoid; finger
-sections are elliptical (flatter back, belly pad) with web thickening near
-the knuckles. Idle fingers rest curled at per-finger `REST_LIFT` heights with
+sections are elliptical (flatter back, belly pad, flatter distal segment) with web thickening near
+the knuckles. Idle fingers relax 75% toward their natural parallel slots
+(`_IDLE_NATURAL_LERP`, idle thumb splays `0.5*hf` outward) and extend forward
+(`_IDLE_FWD`) at per-finger `REST_LIFT` heights with
 a small `0.08*sin(2π*0.35*t)` breathing oscillation (offsets scaled by
-`hf/0.82`). Joint rings get darker vertex colours; nails are specular-tuned;
-each fingertip carries a fake contact-shadow disc (opacity 0.22, fading out
-by 2.5 cm height). A finger holding a key (`press > 0.5`) whose `tip_err >
+`hf/0.82`); fingers in the `held` set (or aiming) keep exact targets and the
+root spring chases the pre-lerp fan mean, so held fingers never drift. Joint rings get darker vertex colours; nails are a subtle vertex-colour patch
+(no mesh, no white dots); pressed fingers blush only near the tip
+(`smoothstep(0.6,1.0,snorm)`) with contact AO baked into the pad side;
+each hand carries one opaque whole-palm blob shadow flattened onto `z'=1.6`
+(hidden in the perspective view). Skin material is ambient 0.40 / diffuse
+0.70 with side-edge darkening, FXAA on (MSAA stays 0). A finger holding a key (`press > 0.5`) whose `tip_err >
 0.1 cm` makes the root chase with fast `TAU = 0.03` for that frame.
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
@@ -203,11 +211,55 @@ constant `tempo` is used. While a finger holds a key, that finger stays
 exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
 the next note.
 
+## Unified skinned hand mesh (Tier B, v2.5.0)
+
+**Rest mesh** (`handmesh.build_rest_mesh`): One smooth-unioned mesh per hand
+built from a signed-distance field (SDF) in wrist-local rest pose (F1: slight
+curl + spread solved by `solve_chain`). Primitives: forearm/palm ellipsoid
+chain from `_ARM` stations (proximal stations replaced by 5 unscaled stubs),
+per-finger 2 tapered capsules + PIP joint sphere, thumb CMC capsule. Combination
+uses `smin` (-k*logaddexp) for intra-finger (k=0.05), finger↔palm/thenar
+(k=0.47), thumb-CMC↔palm (k=0.40), body chain (k=0.30); plain `min()` for
+finger↔finger so neighbours touch but never fuse (F2). Grid step 0.15 cm over
+adaptive bounds; `vtkFlyingEdges3D` iso=0 → `vtkWindowedSincPolyDataFilter`
+(15 iter) → `vtkQuadricDecimation` (≤6000 tris) → normals. Cached to
+`~/.cache/pianoplayer/handmesh_{side}_{hf:.2f}_v1.npz` (rest_pts, faces,
+rest_nrm). First build ~4.3 s, cached load ~0.04 s. Left hand mirrors x +
+reverses face winding (same as `_arm_surface`).
+
+**Skinning weights** (`handmesh.compute_weights`): 18 bones (forearm, palm,
+f1_cmc + 3 per finger). Distance-to-segment `d`; weight `w = exp(-((d-d_min)/0.45)^2)`;
+top-4 renormalised. Verts with nearest bone in {forearm,palm,f1_cmc} and
+runner-up >1.0 cm away get hard weight 1.0 (rigid, exact). Cached in same
+.npz as `idx (N,4) int16` + `w (N,4) float32`.
+
+**Per-frame LBS** (`HandRig._update_skin` in `hand3d.py`): Reuses already-solved
+IK chains (`_skin_q[f]`). Per bone: rest frame `[X0 T0 Z0]` (from `rest_frames`),
+current frame `[X T Z]` (from `_frames` on current bone dirs). `R_b = [X T Z]
+@ [X0 T0 Z0].T`, `v' = P_b + R_b @ (v - P0_b)`. Vectorised over all vertices:
+rigid verts (1.0 weight) get single transform; non-rigid use 4-bone blend via
+`einsum` (no Python loops). Skinning ~2.7 ms/hand (M size, 3002 verts). Tip
+accuracy vs IK `q[3]` ≤0.05 cm in press/rest poses; L/R mirror symmetry holds.
+
+**Procedural skin texture** (`handmesh.build_skin_texture`): 512² PNG written
+to cache dir (`handtex_v2.png`), loaded via path; `texture_path` ctor param
+overrides with user photo (same planar UV). Base tone `(0.95,0.80,0.70)` ±3%
+two-octave value noise (PIL upscaled). Joint-crease bands (~12% dark + light
+ridge) at each finger's MCP/PIP/DIP v-rows across its u-span. 2–3 palm-crease
+arcs. Per-fingertip nail ellipse (`(0.97,0.82,0.74)` → whiter tip + cuticle
+arc). Fingertip/palm-edge blush + pore speckle. Planar UV from rest bounds
+(`u=(x-xmin)/W`, `v=(y-ymin)/H`), static TCoords at build. `Mesh.texture(path)`
+applied.
+
+**API**: `HandRig(mesh="tubes"|"skinned", texture_path=None)` default flips to
+`"skinned"` after acceptance; tubes stay as automatic fallback (try/except +
+one-line warning). CLI/GUI flags unchanged.
+
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.3.0'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.3.0"`).
+  `setup.py` (`version='2.5.0'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.5.0"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

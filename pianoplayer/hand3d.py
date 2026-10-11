@@ -13,8 +13,11 @@ The hand is only three draw calls:
   revolution swept along the *solved* bone chain, so it bends continuously
   instead of being three cylinders with spheres in between.  Its points and
   normals are rewritten in place every frame from a pair of numpy buffers
-  (no allocation, no filter).
-* **five nails** -- small ellipsoids riding on the back of each fingertip.
+  (no allocation, no filter).  Nails are a vertex-colour patch on the back
+  of each fingertip, not a mesh.
+* **one blob shadow per hand** -- a black projector-decal actor sharing the
+  arm/palm dataset, flattening it onto the key plane (opaque, so the depth
+  buffer keeps it behind the hand).
 
 Every frame the rig is re-posed with a small analytic IK solver:
 
@@ -45,6 +48,12 @@ from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
 
+try:
+    from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+except Exception:  # pragma: no cover - vedo pulls in vtk anyway
+    vtkActor = None
+    vtkPolyDataMapper = None
+
 from pianoplayer.utils import (
     BLACK_TOP,
     CONTACT_Y_BLACK,
@@ -55,16 +64,17 @@ from pianoplayer.utils import (
     handSizeFactor,
     key_drop,
     key_is_black,
-    key_top,
 )
 
 # --------------------------------------------------------------------------- #
 # looks
 # --------------------------------------------------------------------------- #
-SKIN = (0.93, 0.73, 0.60)
-SKIN_PRESS = (0.98, 0.57, 0.48)
-NAIL = (0.94, 0.82, 0.79)
-NAIL_PRESS = (0.90, 0.58, 0.56)
+SKIN = (0.95, 0.80, 0.70)
+SKIN_PRESS = (0.96, 0.72, 0.64)
+# H3: the nail is a vertex-colour patch, not a mesh: pinkish white close to
+# the skin (within ~6%), mixed 0.6 over the base colour.
+_NAIL_PATCH = (0.97, 0.82, 0.74)
+_NAIL_MIX = 0.6
 
 FINGER_NAMES = {1: "thumb", 2: "index", 3: "middle", 4: "ring", 5: "little"}
 FINGERS = (1, 2, 3, 4, 5)
@@ -101,7 +111,23 @@ _PINKY_CONTACT_DY = 0.80
 _KB_CENTER = 4.0 * KEYBSIZE + 3.0 * KEY_WB   # (_key_x(21)+_key_x(108))/2
 _SHOULDER_OFF = 15.0
 _YAW_ARM_LEN = 45.0
-_YAW_ARM_MAX = 0.45       # rad, clamp on the arm-yaw part (velocity yaw adds)
+_YAW_ARM_MAX = 0.10       # rad, clamp on the arm-yaw part (H1: 0.45 -> 0.10;
+                          # velocity yaw adds)
+_YAW_ARM_GAIN = 0.4       # H1: the forearm only follows a fraction of the
+                          # shoulder angle, so the hand stays near vertical
+# H1.2: idle fingers relax toward their natural (parallel) slots instead of
+# following the target fan; 0.75 keeps all 70 reach cells green (larger was
+# not probed safe). Guarded by held/aim/rest in update().
+_IDLE_NATURAL_LERP = 0.75
+# H1.3: idle thumb splays outward by this much (x hf); 1.0 breaks two reach
+# cells (XXS-f4, XXL-f5), 0.5 keeps 70/70.
+_THUMB_SPLAY = 0.5
+# H1.4 (D1): idle fingers extend forward by this much (cm x rs, added to the
+# idle yy term) instead of lowering _REST_LIFT/_REST_PULL_Y/_ROOT_Z_BASE
+# (every literal variant fails 8-24 reach cells). The middle finger is the
+# longest, so it needs the largest push. Idle ratio 0.84-0.90, bend
+# 0.52-0.88, 70/70 green.
+_IDLE_FWD = {1: 1.2, 2: 1.2, 3: 1.7, 4: 1.2, 5: 1.2}
 
 # --------------------------------------------------------------------------- #
 # geometry of the hand, in cm, for a size-L (hf = 1.0) right hand
@@ -130,10 +156,10 @@ _SPECS = {
 _ARM = (
     (-46.0, 0.00, 3.60, 2.70, 2.00),
     (-30.0, 0.00, 3.40, 2.60, 2.00),
-    (-16.0, 0.00, 3.00, 2.30, 2.05),
-    (-9.0, 0.00, 2.65, 1.90, 2.15),
-    (-4.5, 0.00, 2.50, 1.55, 2.35),
-    (-1.8, 0.00, 2.55, 1.40, 2.55),      # wrist
+    (-16.0, 0.00, 3.40, 2.30, 2.05),
+    (-9.0, 0.00, 3.60, 1.90, 2.15),
+    (-4.5, 0.00, 3.87, 1.55, 2.35),
+    (-1.8, 0.00, 3.90, 1.40, 2.55),      # wrist
     (0.8, -0.35, 3.20, 1.36, 2.80),
     (3.2, -0.70, 4.10, 1.48, 3.00),
     (5.8, -0.10, 4.55, 1.46, 3.10),
@@ -153,7 +179,13 @@ _TIP_U = (0.0, 0.30, 0.55, 0.75, 0.89, 0.965)
 # D4: finger cross-section is an ellipse, flatter on the back, with a
 # fuller belly (pad side) so light models a real fingertip, not a tube.
 _FING_FLAT = 0.88    # z-radius scale of the section ellipse
+_FING_TIP_FLAT = 0.80  # H2: flatter still over the distal segment (per-station
+                       # flat array in _geom; global _FING_FLAT stays 0.88)
 _FING_BELLY = 0.85   # extra z scale on the pad side (sin < 0)
+# H2: visual finger widths (IK uses lens, so reach is untouched): fingers
+# 2..4 x1.10 and the pinky x1.05 so neighbours touch (P5 guardrail: <= x1.15).
+_FING_R_SCALE = {1: 1.0, 2: 1.10, 3: 1.10, 4: 1.10, 5: 1.05}
+_FING_TIP_TAPER = 0.92  # H2: distal segment 8% slimmer than before
 # D5: resting fingers curl instead of hovering flat (robot look).
 _REST_LIFT = {1: 0.4, 2: 0.9, 3: 1.1, 4: 1.0, 5: 0.8}  # hover height per finger
 # resting fingertip retreats toward the wrist (curl): the thumb needs the
@@ -171,25 +203,28 @@ _BREATHE_PHASE = {1: 0.0, 2: 1.3, 3: 2.1, 4: 3.4, 5: 4.2}  # per-finger phase
 # the root chases with this faster time constant for that frame only.
 _CHASE_TAU = 0.03
 _CHASE_ERR = 0.1
-# D6: looks -- skin material, joint shading, fake fingertip shadows.
-_SKIN_AMBIENT = 0.35
-_SKIN_DIFFUSE = 0.75
+# D6: looks -- skin material, joint shading, blob shadows.
+_SKIN_AMBIENT = 0.40
+_SKIN_DIFFUSE = 0.70
 _SKIN_SPECULAR = 0.08
-_NAIL_SPECULAR = 0.4
-_NAIL_SL = 0.45          # nail length as a fraction of the distal phalanx
+# H3: whole-hand blob shadows: one black projector-decal actor per arm mesh,
+# sharing its dataset (no geometry copy).  The user matrix flattens the arm
+# onto the plane z' = _SHADOW_Z with a slight light offset (PROJ @ arm
+# matrix, refreshed each frame).  Deliberately OPAQUE: the default alpha
+# pass composites translucent-behind-opaque over the hands here (plain-Boxes
+# probe: 143 instead of 230), veiling the whole hand grey, and depth peeling
+# (which composites correctly) costs +190 ms/frame in software rendering --
+# ten times the H4 budget.  Opaque is depth-correct everywhere and cheap;
+# black stays invisible on black keys.  Hidden in perspective view.
+_SHADOW_OFF = (0.35, -0.35)  # offset from the true position, toward the light
+_SHADOW_COL = (0.04, 0.025, 0.025)
+_SHADOW_Z = 1.6              # fixed projection plane, just above black keys
+# H3: fingertip contact AO baked into the finger vertex colours (grounds the
+# fingertip where it meets the key; no actor, no depth involved).
+_PRESS_AO = 0.20             # max darkening of the pad-side tip at full press
 # joint rings shade this much darker/pinker than mid-bone (vertex colours).
 _JOINT_SHADE = (0.93, 0.895, 0.905)
 _JOINT_WIDTH = 0.18       # gaussian width (local t) of the joint shading
-# fake contact shadows: flat dark discs under the fingertips (the real
-# shadow-map is off).  Opacity fades as the fingertip rises.  Tuned small
-# and faint: oversized discs read as dirt, not shadow.
-_SHADOW_OPACITY = 0.22
-_SHADOW_SX = 1.2          # x half-width as a multiple of fingertip radius
-_SHADOW_SY = 1.6          # y half-width ditto
-_SHADOW_OFF = (0.4, -0.4)  # offset from the fingertip, toward the light
-_SHADOW_FADE_H = 2.5       # fingertip height [cm] at which the shadow is gone
-_SHADOW_FLOOR = 0.05
-_SHADOW_COL = (0.04, 0.025, 0.025)
 # D4: static thenar-web ellipsoid filling the thumb/index wedge, in palm
 # frame (radii x hf, set in _build; centre y follows the thumb MCP in
 # __init__ because D1b moves it forward with hand size).  Tuned so it just
@@ -204,41 +239,6 @@ _UP = np.array([0.0, 0.0, 1.0])
 # --------------------------------------------------------------------------- #
 # small maths helpers
 # --------------------------------------------------------------------------- #
-def _frame_from_dir(d, up=(0.0, 0.0, 1.0)):
-    """Orthonormal frame whose +y axis is `d` and whose +z axis is as close
-    as possible to `up` (used to orient the nail on a fingertip).
-
-    Returns a 3x3 nested tuple, laid out like ``np.column_stack((x, y, z))``
-    i.e. ``out[i][j]`` = i-th component of the j-th axis.
-    """
-    dx, dy, dz = float(d[0]), float(d[1]), float(d[2])
-    n = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if n < 1e-9:
-        dx, dy, dz = 0.0, 1.0, 0.0
-    else:
-        dx, dy, dz = dx / n, dy / n, dz / n
-
-    ux, uy, uz = float(up[0]), float(up[1]), float(up[2])
-    xx = dy * uz - dz * uy                 # x = y x up
-    xy = dz * ux - dx * uz
-    xz = dx * uy - dy * ux
-    nx = math.sqrt(xx * xx + xy * xy + xz * xz)
-    if nx < 1e-6:
-        for ax, ay, az in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
-            xx = dy * az - dz * ay
-            xy = dz * ax - dx * az
-            xz = dx * ay - dy * ax
-            nx = math.sqrt(xx * xx + xy * xy + xz * xz)
-            if nx > 1e-6:
-                break
-    xx, xy, xz = xx / nx, xy / nx, xz / nx
-
-    zx = xy * dz - xz * dy                 # z = x x y
-    zy = xz * dx - xx * dz
-    zz = xx * dy - xy * dx
-    return ((xx, dx, zx), (xy, dy, zy), (xz, dz, zz))
-
-
 def _rot_x(a):
     c, s = math.cos(a), math.sin(a)
     return np.array([[1.0, 0, 0], [0, c, -s], [0, s, c]])
@@ -345,6 +345,12 @@ def _hump(y, a, b):
     if u <= 0.0 or u >= 1.0:
         return 0.0
     return math.sin(math.pi * u) ** 1.4
+
+
+def _smoothstep(e0, e1, x):
+    """Hermite 0..1 ramp between the edges `e0` and `e1` (H3 press blush)."""
+    t = np.clip((np.asarray(x, float) - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
 
 
 def _adist(th, a):
@@ -514,11 +520,14 @@ def _finger_radius(seg, t, radii, t0):
         # the joint creases pinch very slightly, the way a knuckle does
         r *= 1.0 - 0.05 * math.exp(-(t / 0.22) ** 2) \
                  - 0.05 * math.exp(-((t - 1.0) / 0.22) ** 2)
+        # H2: slight bumps just inside both joints of the middle phalanx
+        r *= 1.0 + 0.04 * math.exp(-((t - 0.20) / 0.12) ** 2) \
+                 + 0.04 * math.exp(-((t - 0.80) / 0.12) ** 2)
         return r
     if t <= t0:
-        return r2 + (r3 - r2) * (t / t0)
+        return _FING_TIP_TAPER * (r2 + (r3 - r2) * (t / t0))
     u = min(1.0, (t - t0) / (1.0 - t0))
-    return r3 * math.sqrt(max(0.0, 1.0 - u * u))     # hemispherical pulp
+    return _FING_TIP_TAPER * r3 * math.sqrt(max(0.0, 1.0 - u * u))
 
 
 def _finger_stations(lens, radii):
@@ -542,7 +551,14 @@ def _finger_stations(lens, radii):
 # the rig
 # --------------------------------------------------------------------------- #
 class HandRig:
-    """Builds a procedural hand and re-poses it every frame."""
+    """Builds a procedural hand and re-poses it every frame.
+
+    `mesh="tubes"` (default until Tier-B acceptance) poses five tapered
+    tubes + the lofted arm/palm; `mesh="skinned"` replaces them with one
+    smooth-unioned mesh deformed by linear-blend skinning from the same IK
+    chains (tubes stay as the automatic fallback). `texture_path` overrides
+    the procedural skin PNG with a user-supplied photo (same planar UV).
+    """
 
     ROOT_Y = -13.5            # wrist sits behind the front edge of the keys
     ROOT_Z = 2.3
@@ -552,13 +568,22 @@ class HandRig:
     KEY_SINK = 0.10           # fingertip slightly above the pressed key
     TAU = 0.065               # root spring time constant [s]
     YAW_GAIN = 0.006          # rad of yaw per cm/s of hand speed
-    YAW_MAX = 0.16
+    YAW_MAX = 0.05
     PITCH = math.radians(-5.0)
     ROLL = math.radians(5.0)  # sign follows the hand side
     BEND_MAX = 1.75
     COUPLING = 0.4
 
-    def __init__(self, side="right", size="M", skin=SKIN, kb_center=None):
+    def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,
+                 mesh="skinned", texture_path=None):
+        self.side = "left" if str(side).lower().startswith("l") else "right"
+        self.s = 1.0 if self.side == "right" else -1.0
+        self.hf = float(handSizeFactor(size))
+        self.skin = tuple(skin)
+        self.mesh_mode = (str(mesh).lower()
+                          if str(mesh).lower() in ("tubes", "skinned")
+                          else "tubes")
+        self.texture_path = texture_path
         self.side = "left" if str(side).lower().startswith("l") else "right"
         self.s = 1.0 if self.side == "right" else -1.0
         self.hf = float(handSizeFactor(size))
@@ -590,9 +615,12 @@ class HandRig:
         self.max_bend = {}    # finger -> PIP bend angle b1 [rad] of last solve
         self._col = {}
         self._geom = {}
-        self.nail = {}
-        self.shadow = {}
         self._actors = []
+        self._blob_actors = []    # H3: raw vtkActors sharing arm/finger data
+        self._arm_blob = None     # ... (arm blob actor, matrix) or None
+        self._skin = None         # Tier-B skinned mesh state (or None)
+        self._skin_q = {}         # finger -> current q (4,3) world (skinned)
+        self._skin_ms = 0.0       # last _update_skin cost [ms] (profiling)
 
         self._build()
 
@@ -615,6 +643,8 @@ class HandRig:
         self.arm, _, _, _ = _skin_mesh(pts, nrm, faces, self.skin)
         self._place(self.arm)
         _material(self.arm, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+        # H3: whole-hand blob shadow sharing the arm dataset.
+        self._add_blob(self.arm.dataset)
 
         # fingers: one skinned tube each --------------------------------
         th = 2.0 * math.pi * np.arange(_FING_M) / _FING_M
@@ -625,7 +655,8 @@ class HandRig:
                 # D1b: thumb MCP forward (per-instance, progressive with size)
                 base = (base[0], self._thumb_by, base[2])
             lens = [l * self.hf for l in spec["lens"]]
-            radii = [r * self.hf for r in spec["radii"]]
+            # H2: visual width (IK only uses lens); thumb keeps its size.
+            radii = [r * self.hf * _FING_R_SCALE[f] for r in spec["radii"]]
             seg, t, s, r = _finger_stations(lens, radii)
             K = len(seg)
             fpts = np.zeros((K * _FING_M + 2, 3))
@@ -637,6 +668,7 @@ class HandRig:
                 mesh=mesh, mods=mods, pts=fpts, nrm=fnrm, K=K,
                 seg=seg, t=t, r=r, drds=np.gradient(r, s),
                 cos=np.cos(th), sin=np.sin(th),
+                flat=np.where(seg == 2, _FING_TIP_FLAT, _FING_FLAT),
                 lens=lens, radii=radii,
                 base_local=self._L(base),
                 pole_local=np.array([spec["pole"][0] * self.s,
@@ -659,6 +691,10 @@ class HandRig:
             shade[:K * _FING_M] = np.repeat(ring_shade, _FING_M, axis=0)
             g = self._geom[f]
             g["shade"] = shade
+            # H4: side-edge darkening (finger volume), precomputed at build.
+            edge = np.ones(n_pts)
+            edge[:K * _FING_M] = np.tile(1.0 - 0.10 * np.abs(np.cos(th)), K)
+            g["edge"] = edge
             g["rgb"] = np.zeros((n_pts, 3), np.uint8)
             arr = numpy_to_vtk(g["rgb"], deep=0)
             arr.SetName("RGB")
@@ -666,26 +702,26 @@ class HandRig:
             mesh.mapper.SetColorModeToDirectScalars()
             mesh.color(None)          # use the point colours, not the uniform
             g["rgb_arr"] = arr
-            self._paint(f, self.skin)
-            r3 = radii[3]
-            nail = self._place(
-                Ellipsoid(pos=(0, 0, 0), axis1=(r3 * 0.74, 0, 0),
-                          axis2=(0, r3 * 1.00, 0), axis3=(0, 0, r3 * 0.22),
-                          res=14, c=NAIL))
-            self.nail[f] = nail
-            _material(nail, _SKIN_AMBIENT, _SKIN_DIFFUSE, _NAIL_SPECULAR)
-            # D6: flat fake contact shadow riding under the fingertip.
-            sh = self._place(
-                Ellipsoid(pos=(0, 0, 0),
-                          axis1=(r3 * _SHADOW_SX, 0, 0),
-                          axis2=(0, r3 * _SHADOW_SY, 0),
-                          axis3=(0, 0, 0.06), res=12, c=_SHADOW_COL))
-            sh.alpha(_SHADOW_OPACITY)
-            try:
-                sh.actor.GetProperty().LightingOff()
-            except Exception:
-                pass
-            self.shadow[f] = sh
+            # H3: press-blend coordinate (MCP = 0 .. tip = 1) and the
+            # vertex-colour nail patch (back of the distal segment).
+            smax = float(s.max()) if float(s.max()) > 0.0 else 1.0
+            snorm = np.ones(n_pts)
+            snorm[:K * _FING_M] = np.repeat(s / smax, _FING_M)
+            snorm[K * _FING_M] = 0.0       # MCP end cap
+            snorm[K * _FING_M + 1] = 1.0   # fingertip pole
+            g["snorm"] = snorm
+            g["t0"] = t0
+            sin_rep = np.tile(np.sin(th), K)
+            seg_rep = np.repeat(seg, _FING_M)
+            t_rep = np.repeat(t, _FING_M)
+            nailm = np.zeros(n_pts, bool)
+            nailm[:K * _FING_M] = ((sin_rep > 0.0) & (seg_rep == 2)
+                                   & (t_rep > t0 - 0.1))
+            g["nailm"] = nailm
+            padm = np.zeros(n_pts, bool)
+            padm[:K * _FING_M] = np.tile(np.sin(th) < 0.0, K)
+            g["padm"] = padm
+            self._paint(f, 0.0)
 
         # D4: static thenar-web ellipsoid filling the thumb/index wedge.
         # It rides the palm frame (placed in update() with the arm's matrix).
@@ -696,8 +732,166 @@ class HandRig:
                       res=14, c=self.skin))
         _material(self.web, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
 
+        # Tier B: one smooth-unioned mesh, skinned from the same IK chains.
+        # Tubes stay built (fallback + compat buffers); skinned mode hides
+        # their actors instead of deleting them.
+        if self.mesh_mode == "skinned":
+            try:
+                self._build_skin()
+            except Exception as exc:
+                print("HandRig: skinned mesh unavailable (%s); "
+                      "falling back to tubes" % exc)
+                self.mesh_mode = "tubes"
+                self._skin = None
+
         # start with a neutral, slightly curled pose ----------------------
         self.reset()
+
+    def _build_skin(self):
+        """Load the cached rest mesh + weights, make the one skin mesh."""
+        from pianoplayer.handmesh import (
+            build_skin_texture,
+            get_rest_data,
+            rest_uv,
+        )
+        from pianoplayer.handmesh import texture_path as _default_tex
+        data = get_rest_data(self.hf, self.side)
+        rest = np.array(data["pts"], float)
+        nrm0 = np.array(data["nrm"], float)
+        names, bones = data["names"], data["bones"]
+        idx = np.array(data["idx"], np.int64)
+        w = np.array(data["w"], float)
+        P0 = np.array(data["P0"], float)
+        R0 = np.array(data["R0"], float)
+        mesh, pbuf, nbuf, mods = _skin_mesh(rest, nrm0, data["faces"],
+                                            self.skin)
+        mesh._rig_matrix = None        # static planar UVs (rest pose; kept through skinning) + texture
+        uv, _ = rest_uv(rest)
+        try:
+            import vtkmodules.util.numpy_support as _ns
+            tc = _ns.numpy_to_vtk(np.ascontiguousarray(uv, np.float32),
+                                  deep=1)
+            tc.SetName("TCoords")
+            mesh.dataset.GetPointData().SetTCoords(tc)
+        except Exception:
+            pass
+        tpath = self.texture_path or _default_tex()
+        try:
+            import os as _os
+            if not _os.path.isfile(tpath):
+                build_skin_texture(rest, bones, tpath, names=names,
+                                   hf=self.hf)
+            mesh.texture(tpath)
+        except Exception:
+            pass
+        _material(mesh, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+        B = len(names)
+        rigid = np.array([nm in ("forearm", "palm", "f1_cmc") for nm in
+                          names])
+        fb = {}
+        for f in FINGERS:
+            fb[f] = [names.index("f%d_%d" % (f, i)) for i in range(3)]
+        # Precompute flat list of finger bone indices (15 bones) for vectorized setup
+        fb_flat = np.array([fb[f][i] for f in FINGERS for i in range(3)], dtype=np.int64)
+        # float32 working copies (N=3002: halves the per-frame LBS flops;
+        # pbuf/nbuf casts on assignment are cheap).
+        rest32 = np.ascontiguousarray(rest, np.float32)
+        nrm32 = np.ascontiguousarray(nrm0, np.float32)
+        P032 = np.ascontiguousarray(P0, np.float32)
+        R032 = np.ascontiguousarray(R0, np.float32)
+        w32 = np.ascontiguousarray(w, np.float32)
+        # Precompute rigid vertex mask (weight 1.0 on rigid bone)
+        rigid_mask = (w32[:, 0] >= 0.99) & np.isin(idx[:, 0], np.flatnonzero(rigid))
+        self._skin = dict(mesh=mesh, mods=mods, pbuf=pbuf, nbuf=nbuf,
+                          rest=rest32, nrm0=nrm32, idx=idx, w=w32,
+                          P0=P032, R0=R032, P0g=P032[idx],
+                          names=names, bones=bones, B=B, rigid=rigid, fb=fb,
+                          fb_flat=fb_flat,
+                          Rb=np.empty((B, 3, 3), np.float32),
+                          Pb=np.empty((B, 3), np.float32),
+                          rigid_mask=rigid_mask)
+        # seed the skin chains (world) from the rest pose so a partial fan
+        # update can never KeyError before reset() solves every finger.
+        from pianoplayer.handmesh import rest_bones as _rb
+        _bb, _nn = _rb(self.hf, self.side)
+        _by = {nm: (np.asarray(a, float), np.asarray(b, float))
+               for nm, (a, b) in zip(_nn, _bb)}
+        _R0 = (_rot_z(0.0) @ _rot_y(-self.s * self.ROLL)
+               @ _rot_x(self.PITCH))
+        _r0 = np.array([0.0, self.ROOT_Y, self.ROOT_Z])
+        for f in FINGERS:
+            try:
+                a0, _b0 = _by["f%d_0" % f]
+                _a1, b1 = _by["f%d_1" % f]
+                _a2, b2 = _by["f%d_2" % f]
+                ql = np.stack([a0, _b0, b1, b2])
+            except KeyError:
+                ql = np.zeros((4, 3))
+            self._skin_q[f] = _r0 + ql @ _R0.T
+        # hide the tube actors (NOT deleted: fallback + compat buffers stay)
+        try:
+            self.arm.actor.SetVisibility(0)
+            self.web.actor.SetVisibility(0)
+            for f in FINGERS:
+                self._geom[f]["mesh"].actor.SetVisibility(0)
+        except Exception:
+            pass
+
+    def _update_skin(self, R):
+        """Vectorised LBS of the skin mesh from the solved chains (F3)."""
+        import time as _tm
+        t0 = _tm.perf_counter()
+        S = self._skin
+        Rb, Pb = S["Rb"], S["Pb"]
+        Rb[S["rigid"]] = np.asarray(R, np.float32)
+        Pb[S["rigid"]] = np.asarray(self.root, np.float32)
+        # Vectorized finger bone setup: stack all _skin_q -> (5,4,3)
+        q_all = np.stack([self._skin_q[f] for f in FINGERS])  # (5,4,3)
+        d = q_all[:, 1:] - q_all[:, :-1]  # (5,3,3) per-finger bone dirs
+        n = np.linalg.norm(d, axis=2, keepdims=True)
+        dirs = d / np.maximum(n, 1e-9)    # (5,3,3)
+        dirs_flat = dirs.reshape(-1, 3)   # (15,3)
+        # Precompute flat list of finger bone indices
+        fb_flat = S["fb_flat"]
+        R0_fingers = S["R0"][fb_flat]     # (15,3,3)
+        X, Z = _frames(dirs_flat)
+        Rc = np.stack([X, dirs_flat, Z], axis=2).astype(np.float32)  # (15,3,3)
+        # Batched: Rb[b] = Rc @ R0.T, Pb[b] = q[i]
+        Rb[fb_flat] = Rc @ np.transpose(R0_fingers, (0, 2, 1))
+        Pb[fb_flat] = q_all[:, :-1].reshape(-1, 3)
+        idx, w = S["idx"], S["w"]
+        rest = S["rest"]
+        nrm0 = S["nrm0"]
+        P0g = S["P0g"]
+        rigid_mask = S["rigid_mask"]
+        non_rigid = ~rigid_mask
+        # Rigid vertices: single transform (root + R @ v)
+        if rigid_mask.any():
+            S["pbuf"][rigid_mask] = self.root + (R @ rest[rigid_mask].T).T
+            S["nbuf"][rigid_mask] = (R @ nrm0[rigid_mask].T).T
+        # Non-rigid vertices: full 4-bone blend using einsum
+        if non_rigid.any():
+            nr = non_rigid
+            idx_nr = idx[nr]           # (M,4)
+            w_nr = w[nr]               # (M,4)
+            rest_nr = rest[nr]         # (M,3)
+            nrm0_nr = nrm0[nr]         # (M,3)
+            P0g_nr = P0g[nr]           # (M,4,3)
+            Rb_idx = Rb[idx_nr]        # (M,4,3,3)
+            Pb_idx = Pb[idx_nr]        # (M,4,3)
+            offset = rest_nr[:, None, :] - P0g_nr  # (M,4,3)
+            # Batched matrix-vector multiply via einsum
+            v = Pb_idx + np.einsum('mikj,mij->mik', Rb_idx, offset)
+            S["pbuf"][nr] = (v * w_nr[..., None]).sum(axis=1)
+            # Normals: rotate by bone rotations, blend via einsum, final normalize
+            n_rot = np.einsum('mikj,mj->mik', Rb_idx, nrm0_nr)  # (M,4,3)
+            nbuf = np.einsum('mi,mij->mj', w_nr, n_rot)
+            nbuf /= np.maximum(np.linalg.norm(nbuf, axis=1, keepdims=True), 1e-12)
+            S["nbuf"][nr] = nbuf
+        for m in S["mods"]:
+            m.Modified()
+        S["mesh"].actor.Modified()
+        self._skin_ms = 1000.0 * (_tm.perf_counter() - t0)
 
     def _neutral_x(self):
         """Keyboard x of every finger when the hand just hovers at rest."""
@@ -709,8 +903,8 @@ class HandRig:
     def _set(mesh, R, t):
         """Copy a 3x3 rotation + translation into the mesh's rig matrix.
 
-        `R` is either a numpy 3x3 or a nested tuple (see `_frame_from_dir`);
-        both index the same way."""
+        `R` is either a numpy 3x3 or a nested tuple; both index the same way.
+        """
         m = mesh._rig_matrix
         r0, r1, r2 = R[0], R[1], R[2]
         m.SetElement(0, 0, r0[0])
@@ -742,16 +936,18 @@ class HandRig:
         T /= np.where(n < 1e-9, 1.0, n)
 
         X, Z = _frames(T)
-        # D4: elliptical section (flatter back, fuller pad) instead of round
+        # D4: elliptical section (flatter back, fuller pad) instead of round;
+        # H2: the flat is per-station (flatter over the distal segment).
         belly = np.where(g["sin"] < 0.0, _FING_BELLY, 1.0)
-        zy = g["sin"] * _FING_FLAT * belly
+        zy = g["sin"][None, :] * g["flat"][:, None] * belly[None, :]
         radial = (g["cos"][None, :, None] * X[:, None, :]
-                  + zy[None, :, None] * Z[:, None, :])
+                  + zy[:, :, None] * Z[:, None, :])
         V = C[:, None, :] + g["r"][:, None, None] * radial
         # the surface normal of a tapering tube leans away from the tip;
         # the ellipse contributes its (cos/a, sin/b) normal (plan: a=1, b=FLAT)
         N = (g["cos"][None, :, None] * X[:, None, :]
-             + (g["sin"] / _FING_FLAT)[None, :, None] * Z[:, None, :]
+             + (g["sin"][None, :] / g["flat"][:, None])[:, :, None]
+             * Z[:, None, :]
              - g["drds"][:, None, None] * T[:, None, :])
         N /= np.linalg.norm(N, axis=2, keepdims=True)
 
@@ -765,11 +961,31 @@ class HandRig:
             m.Modified()
         g["mesh"].actor.Modified()
 
-    def _paint(self, f, col):
-        """D6: repaint a finger's vertex colours (uniform `col` x joint shade)."""
+    def _paint(self, f, amount):
+        """H3: repaint a finger's vertex colours.
+
+        The press colour only blushes the fingertip
+        (`smoothstep(0.6, 1.0, snorm) * amount`); the nail region keeps a
+        fixed pinkish-white patch (nails do not blush with the fingertip).
+        """
         g = self._geom[f]
-        g["rgb"][:] = (np.clip(np.asarray(col, float)[None, :]
-                               * g["shade"], 0.0, 1.0) * 255.0 + 0.5
+        a = float(min(max(amount, 0.0), 1.0))
+        w = _smoothstep(0.6, 1.0, g["snorm"]) * a
+        skin = np.asarray(SKIN, float)[None, :]
+        pr = np.asarray(SKIN_PRESS, float)[None, :]
+        base = skin + (pr - skin) * w[:, None]
+        nm = g["nailm"]
+        if bool(nm.any()):
+            sk = np.asarray(SKIN, float)[None, :]
+            patch = np.asarray(_NAIL_PATCH, float)[None, :]
+            base[nm] = sk * (1.0 - _NAIL_MIX) + patch * _NAIL_MIX
+        # H3: contact AO: the pad side near the tip darkens with the press,
+        # grounding the fingertip on its key (disjoint from the nail patch).
+        ao = (_smoothstep(0.55, 1.0, g["snorm"]) * a
+              * g["padm"].astype(float))
+        base *= (1.0 - _PRESS_AO * ao)[:, None]
+        g["rgb"][:] = (np.clip(base * g["shade"] * g["edge"][:, None],
+                                0.0, 1.0) * 255.0 + 0.5
                        ).astype(np.uint8)
         g["rgb_arr"].Modified()
         g["mesh"].actor.Modified()
@@ -779,13 +995,73 @@ class HandRig:
         if prev is not None and abs(prev - a) < 0.02:
             return
         self._col[f] = a
-        c = tuple(SKIN[i] + (SKIN_PRESS[i] - SKIN[i]) * a for i in range(3))
-        self._paint(f, c)
-        cn = tuple(NAIL[i] + (NAIL_PRESS[i] - NAIL[i]) * a for i in range(3))
-        self.nail[f].color(cn)
+        self._paint(f, a)
+
+    # ------------------------------------------------------------- shadows
+    def _add_blob(self, pd):
+        """H3: black projector-decal actor sharing the arm dataset `pd`.
+
+        No geometry is copied; the actor flattens the arm/palm onto the key
+        plane (PROJ @ arm matrix, refreshed in `_set_arm_shadow`).  Only the
+        arm uses it: finger tubes dip below the shadow plane when pressed,
+        so their own opaque shadow would cap the fingertip black, and their
+        transparent one veils the hand (see _SHADOW_* notes).  Silently
+        skipped when raw vtk actors are unavailable.
+        """
+        if vtkActor is None or vtkPolyDataMapper is None:
+            return
+        try:
+            mapper = vtkPolyDataMapper()
+            mapper.SetInputData(pd)
+            mapper.SetScalarVisibility(False)
+            actor = vtkActor()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(*_SHADOW_COL)
+            try:
+                actor.GetProperty().LightingOff()
+            except Exception:
+                pass
+            mat = vtkMatrix4x4()
+            mat.Identity()
+            self._arm_blob = (actor, mat)
+            actor.SetUserMatrix(mat)
+            self._blob_actors.append(actor)
+        except Exception:
+            pass
+
+    def _set_arm_shadow(self, R, t):
+        """Refresh the arm blob matrix: the PROJ flattening after the arm's
+        own rigid motion.  Called with the same R, t as the arm itself."""
+        if not self._arm_blob:
+            return
+        actor, mat = self._arm_blob
+        r0, r1 = R[0], R[1]
+        mat.SetElement(0, 0, r0[0])
+        mat.SetElement(0, 1, r0[1])
+        mat.SetElement(0, 2, r0[2])
+        mat.SetElement(0, 3, t[0] + _SHADOW_OFF[0])
+        mat.SetElement(1, 0, r1[0])
+        mat.SetElement(1, 1, r1[1])
+        mat.SetElement(1, 2, r1[2])
+        mat.SetElement(1, 3, t[1] + _SHADOW_OFF[1])
+        mat.SetElement(2, 0, 0.0)
+        mat.SetElement(2, 1, 0.0)
+        mat.SetElement(2, 2, 0.0)
+        mat.SetElement(2, 3, _SHADOW_Z)
+        mat.Modified()
+        actor.Modified()
+
+    def set_shadows_visible(self, v):
+        """Show (orthographic top view) or hide (perspective) the blob
+        shadows; called from `vkeyboard.toggle_view`."""
+        for a in self._blob_actors:
+            try:
+                a.SetVisibility(1 if v else 0)
+            except Exception:
+                pass
 
     def update(self, dt, finger_x, press=None, advance_black=None,
-                 aim_finger=None):
+                 aim_finger=None, held=None):
         """
         Re-pose the whole hand.
 
@@ -807,20 +1083,45 @@ class HandRig:
             not yet pressed): it lowers early to `top + HOVER` while the
             other idle fingers keep their per-finger REST_LIFT curl (D5).
             None (e.g. in tests) means no finger is aiming.
+        held : None | set
+            fingers currently holding a key (passed from `_frame` as
+            `{f for f in FINGERS if p.active.get(f)}`): they keep exactly
+            their key x, never lerped.  None (settle, diag, tests) means no
+            finger is known-held, so every idle finger relaxes toward its
+            natural slot.  The guard keys off `held`, never off the press
+            amount, so a held finger targets its key exactly even in early
+            frames when press is still ~ 0.
         """
         dt = float(min(max(dt, 1e-4), 0.1))
         press = press or {}
         self._t += dt
+        held = set() if held is None else set(held)
 
         # ---- fingertip targets ----------------------------------------
         targets = {}
+        fan_xs = {}       # H1.2: pre-lerp x per finger; the root spring below
+                          # chases their mean, so the idle lerp cannot drag
+                          # the root (and the pressed fingers) away with it.
         black_pressed = False
+        # H1.2: natural (parallel) slots from the root at frame start --
+        # the root spring below moves afterwards, so this cannot feed back.
+        natural = self._neutral_x()
         for f in FINGERS:
             x = finger_x.get(f) if finger_x else None
             if x is None:
                 x = self._targets_x.get(f)
             if x is None:
                 continue
+            fan_xs[f] = float(x)
+            a = float(min(max(press.get(f, 0.0), 0.0), 1.0))
+            rest = 1.0 - a
+            if f not in held and f != aim_finger and rest > 0.5:
+                # H1.2/1.3: idle fingers head for their natural slots and
+                # the idle thumb splays outward like a real hand.
+                x = ((1.0 - _IDLE_NATURAL_LERP) * float(x)
+                     + _IDLE_NATURAL_LERP * natural[f])
+                if f == 1:
+                    x -= self.s * _THUMB_SPLAY * self.hf
             black = key_is_black(x)
             name = FINGER_NAMES[f]
             y = CONTACT_Y_BLACK[name] if black else CONTACT_Y_WHITE[name]
@@ -828,9 +1129,7 @@ class HandRig:
                 # D1c: pinky contact sits closer to the player (short finger)
                 y -= _PINKY_CONTACT_DY
             top = BLACK_TOP if black else WHITE_TOP
-            a = float(min(max(press.get(f, 0.0), 0.0), 1.0))
             pressed_z = top - key_drop(x, y, a) + self.KEY_SINK
-            rest = 1.0 - a
             rs = self.hf / _REST_REF_HF
             if f == aim_finger and rest > 0.0:
                 # D5: the finger about to strike lowers early.
@@ -840,12 +1139,14 @@ class HandRig:
                 # D5: idle fingers curl at their per-finger rest height and
                 # breathe; everything scales with `rest` so a fully pressed
                 # finger (a == 1) still lands exactly on its key (A2).
+                # H1.4 (D1): idle fingers also extend forward by _IDLE_FWD.
                 breathe = (_BREATHE_AMP * rs
                            * math.sin(2.0 * math.pi * _BREATHE_FREQ * self._t
                                       + _BREATHE_PHASE[f]) * rest)
                 z = ((top + (_REST_LIFT[f] + _REST_PULL_Z) * rs) * rest
                      + pressed_z * a + breathe)
-                yy = y - _REST_PULL_Y[f] * rs * rest
+                yy = (y - _REST_PULL_Y[f] * rs * rest
+                      + _IDLE_FWD[f] * rs * rest)
             else:
                 z = pressed_z
                 yy = y
@@ -853,8 +1154,8 @@ class HandRig:
             black_pressed = black_pressed or (black and a > 0.004)
         self._targets_x = {f: t[0] for f, t in targets.items()}
 
-        # ---- root: spring toward the mean of the targets ---------------
-        xs = [t[0] for t in targets.values()]
+        # ---- root: spring toward the mean of the (pre-lerp) targets --
+        xs = [fan_xs[f] for f in targets] if fan_xs else []
         rx_t = float(np.mean(xs)) if xs else float(self.root[0])
         any_black = black_pressed if advance_black is None else (
             black_pressed or bool(advance_black))
@@ -879,7 +1180,8 @@ class HandRig:
         # D3: the forearm yaws around the wrist toward the elbow side, more
         # so near the ends of the keyboard; the velocity yaw adds on top.
         shoulder_x = self.kb_center + self.s * _SHOULDER_OFF
-        yaw_arm = math.atan2(float(self.root[0]) - shoulder_x, _YAW_ARM_LEN)
+        yaw_arm = (math.atan2(float(self.root[0]) - shoulder_x,
+                              _YAW_ARM_LEN) * _YAW_ARM_GAIN)
         yaw_arm = max(-_YAW_ARM_MAX, min(_YAW_ARM_MAX, yaw_arm))
         yaw_t = yaw_arm + yaw_vel
         self.yaw += (yaw_t - self.yaw) * (1.0 - math.exp(-dt / 0.12))
@@ -888,9 +1190,11 @@ class HandRig:
         R = _rot_z(self.yaw) @ _rot_y(-self.s * self.ROLL) @ _rot_x(self.PITCH)
         self._set(self.arm, R, self.root)
         self._set(self.web, R, self.root + R @ self._web_local)
+        self._set_arm_shadow(R, self.root)
 
         # ---- fingers ---------------------------------------------------
         q = np.empty((4, 3))
+        skinned = self._skin is not None
         for f in FINGERS:
             t = targets.get(f)
             if t is None:
@@ -907,29 +1211,18 @@ class HandRig:
             self.tip_err[f] = float(np.linalg.norm(
                 q[3] - np.array([x, y, z])))
             self.max_bend[f] = float(b1)
+            if skinned:
+                # IK hooks stay exact (reach/regression/diag read these);
+                # the hidden tubes keep only compat tip/cap points.
+                self._skin_q[f] = q.copy()
+                g["pts"][-1] = q[3]
+                g["pts"][-2] = q[0]
+                continue
             self._skin_finger(g, q)
-
-            d23 = q[3] - q[2]
-            n3 = float(np.linalg.norm(d23))
-            dir3 = d23 / n3 if n3 > 1e-9 else np.array([0.0, 1.0, 0.0])
-            f2 = _frame_from_dir(dir3)
-            nz = 0.80 * g["radii"][3]
-            sl = _NAIL_SL * g["lens"][2]
-            self._set(self.nail[f], f2,
-                      (q[2][0] + dir3[0] * sl + f2[0][2] * nz,
-                       q[2][1] + dir3[1] * sl + f2[1][2] * nz,
-                       q[2][2] + dir3[2] * sl + f2[2][2] * nz))
+            # H3: fingertip-only press blush (no nail mesh, no shadow disc).
             self._tint(f, a)
-            # D6: fake contact shadow under the fingertip, fading with height.
-            tip = q[3]
-            ktop = key_top(x)
-            h = max(0.0, float(tip[2]) - ktop)
-            fade = max(_SHADOW_FLOOR, 1.0 - h / _SHADOW_FADE_H)
-            sc = 1.0 + h / 6.0
-            self._set(self.shadow[f], np.eye(3) * sc,
-                      (float(tip[0]) + _SHADOW_OFF[0],
-                       float(tip[1]) + _SHADOW_OFF[1], ktop + 0.03))
-            self.shadow[f].alpha(_SHADOW_OPACITY * fade)
+        if skinned:
+            self._update_skin(R)
 
     # --------------------------------------------------------------- helpers
     def settle(self, finger_x, press=None, steps=8, advance_black=None):
@@ -952,10 +1245,21 @@ class HandRig:
         return self
 
     def actors(self):
-        """All the meshes composing the hand (add them to a Plotter)."""
+        """All the meshes composing the hand (add them to a Plotter).
+
+        Skinned mode exposes only the one skin mesh: the hidden tube actors
+        stay out so mask/diag logic cannot force them visible again.
+        """
+        if self._skin is not None:
+            return [self._skin["mesh"]]
         return list(self._actors)
 
     def add_to(self, plotter):
-        for m in self._actors:
+        for m in self.actors():
             plotter.add(m)
+        for a in self._blob_actors:
+            try:
+                plotter.add(a)
+            except Exception:
+                pass
         return plotter

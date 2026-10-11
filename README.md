@@ -125,7 +125,18 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   view and back; `Esc`/`q` or the close button quits;
 - **procedural hands**: palms, joints, finger pads and nails are built from
   primitives and re-posed every frame by a small analytic IK solver, so the
-  fingers arch and flex like real ones and the thumb reaches the black keys;
+  fingers arch and flex like real ones and the thumb reaches the black keys.
+  Idle fingers stay parallel and extended with splayed thumbs; a pressed
+  finger only blushes slightly at the tip, nails are a subtle patch of
+  vertex colour, and each hand carries a soft projector shadow on the keys
+  (hidden when you flip to the perspective view); edges are smoothed with
+  FXAA;
+- **unified skinned mesh (v2.5.0)**: the five detached finger tubes are
+  replaced by one smooth-unioned mesh per hand (SDF rest pose, linear-blend
+  skinning from the same IK chains), with procedural skin texture (tone noise,
+  joint creases, nails, fingertip blush). Tubes remain as automatic fallback.
+  The rest mesh is cached (~4 s first build, ~40 ms cached); skinning runs
+  in ~2.7 ms/frame per hand;
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent;
 - **tempo comes from the score**: every note - including chords - sounds at
