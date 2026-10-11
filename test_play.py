@@ -94,6 +94,12 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     pressed_peak = 0
     keys_down = set()
     rig_moves = []
+    # C4 evidence: tip_err of fingers holding a key.  A press starts with the
+    # finger in flight (large transient err is physics, not a bug), so only
+    # samples taken >= 0.15 s after the press began, with press > 0.9, count
+    # as steady-state hold quality.
+    press_start = {}
+    hold_err = []
     while t < seconds:
         clock["t"] = t
         vk._frame(t, dt)
@@ -103,6 +109,18 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
         for name, amt in vk._key_amt.items():
             if amt > 0.5:
                 keys_down.add(name)
+        for p in vk._players.values():
+            for f, pv in p.press.items():
+                k = (id(p), f)
+                if pv > 0.5 and k not in press_start:
+                    press_start[k] = t
+                elif pv <= 0.5 and k in press_start:
+                    del press_start[k]
+                if (k in press_start and t - press_start[k] > 0.15
+                        and pv > 0.9):
+                    e = p.rig.tip_err.get(f)
+                    if e is not None:
+                        hold_err.append(float(e))
         if not rig_moves and t >= 3.0:
             rig_moves.append(tuple(vk.RH.root.round(2)))
         for mark, tag in list(shots.items()):
@@ -110,7 +128,7 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
                 vk.vp.screenshot(os.path.join(OUT, "%s.png" % tag))
                 del shots[mark]
         # next frame: score time follows the wall clock (see _on_timer)
-        tn = time.time() - vk._t0
+        tn = time.perf_counter() - vk._t0
         dt = tn - t
         if dt <= 0.0 or dt > 0.25:
             dt = FPS_MS / 1000.0
@@ -158,6 +176,27 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
         print("FAIL: no key animation"); ok = False
     if len(rh.noteseq) and not vk.RH._targets_x:
         print("FAIL: right hand never got a target"); ok = False
+    if hold_err:
+        # C4: steady-state hold quality (see sampling rule above).  Short
+        # holds in fast runs stretch while the root serves other fingers,
+        # so the max is span physics; what must stay small is the typical
+        # error.  The hard cap only guards against detached-hand regressions.
+        import numpy as _np
+        _h = _np.array(hold_err)
+        print("hold tip_err: n=%d max=%.3f cm mean=%.3f cm p95=%.3f cm"
+              % (len(_h), _h.max(), _h.mean(),
+                 float(_np.percentile(_h, 95))))
+        if float(_np.percentile(_h, 95)) > 1.5:
+            print("FAIL: holding fingers are typically off their keys")
+            ok = False
+        if _h.mean() > 0.5:
+            print("FAIL: holding fingers are on average off their keys")
+            ok = False
+        if _h.max() > 4.0:
+            print("FAIL: a holding finger is detached from its key")
+            ok = False
+    elif rh.noteseq:
+        print("FAIL: no holding finger ever sampled"); ok = False
     vk._stop_audio()
     print("RESULT:", "OK" if ok else "FAILED")
     return 0 if ok else 1

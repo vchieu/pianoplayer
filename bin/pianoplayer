@@ -144,7 +144,7 @@ else: ##########################################################################
     pr.add_argument("-o", "--outputfile", metavar='', type=str, help="Annotated output xml file name", default='output.xml')
     pr.add_argument("-n", "--n-measures", metavar='', type=int, help="[100] Number of score measures to scan", default=100)
     pr.add_argument("-s", "--start-measure", metavar='', type=int, help="Start from measure number [1]", default=1)
-    pr.add_argument("-d", "--depth", metavar='', type=int, help="[auto] Depth of combinatorial search, [4-9]", default=0)
+    pr.add_argument("-d", "--depth", metavar='', type=int, help="[auto] Depth of combinatorial search, [4-9] (legacy window mode only)", default=0)
     pr.add_argument("-rbeam", metavar='', type=int, help="[0] Specify Right Hand beam number", default=0)
     pr.add_argument("-lbeam", metavar='', type=int, help="[1] Specify Left Hand beam number", default=1)
     pr.add_argument("--quiet",             help="Switch off verbosity", action="store_true")
@@ -152,6 +152,7 @@ else: ##########################################################################
     pr.add_argument("-b", "--below-beam",  help="Show fingering numbers below beam line", action="store_true")
     pr.add_argument("-v", "--with-vedo",   help="Play 3D scene after processing", action="store_true")
     pr.add_argument("--vedo-speed", metavar='', type=float, help="[1] Playback rate: 1 keeps the score's own tempo", default=1.0)
+    pr.add_argument("--av-offset-ms", metavar='', type=float, help="[0] Sound-minus-image latency in ms (overrides PIANOPLAYER_AV_MS): raise when the picture runs ahead of the sound", default=0.0)
     pr.add_argument("-z", "--sound-off",   help="Disable sound", action="store_true")
     pr.add_argument("-l", "--left-only",   help="Fingering for left hand only", action="store_true")
     pr.add_argument("-r", "--right-only",  help="Fingering for right hand only", action="store_true")
@@ -244,6 +245,13 @@ else: ##########################################################################
 
         vk = VirtualKeyboard(songname=xmlfn, tempo=score_tempo(sf))
         vk.tempo_map = score_tempo_map(sf)
+        if args.av_offset_ms:
+            vk.av_offset = float(args.av_offset_ms) / 1000.0
+        elif os.environ.get("PIANOPLAYER_AV_MS"):
+            try:
+                vk.av_offset = float(os.environ["PIANOPLAYER_AV_MS"]) / 1000.0
+            except ValueError:
+                pass
 
         if not args.left_only:
             vk.build_RH(rh)

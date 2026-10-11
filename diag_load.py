@@ -131,7 +131,7 @@ def main(fn="scores/bach_invention4.xml", seconds=8.0):
             ring.append((time.time() - t0, be._buffered()))
         if f2 - f0 > 0.10:
             slow.append((time.time() - t0, 1000.0 * (f2 - f0)))
-        tn = time.time() - vk._t0
+        tn = time.perf_counter() - vk._t0
         dt = tn - t
         if dt <= 0.0 or dt > 0.25:
             dt = FPS_MS / 1000.0

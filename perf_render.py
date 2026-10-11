@@ -48,7 +48,7 @@ for label, msaa, live in CONFIGS:
         (vk.build_RH if sign > 0 else vk.build_LH)(h)
     if live:
         vk._prepare()
-        vk._t0 = time.time()
+        vk._t0 = time.perf_counter()
         vk._last = vk._t0
     for _ in range(4):
         if live:
@@ -61,7 +61,7 @@ for label, msaa, live in CONFIGS:
     while n < N:
         f0 = time.perf_counter()
         if live:
-            now = time.time() - vk._t0
+            now = time.perf_counter() - vk._t0
             vk._frame(now, FPS_MS / 1000.0)
             tf += 1000.0 * (time.perf_counter() - f0)
         r0 = time.perf_counter()

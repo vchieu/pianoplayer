@@ -74,6 +74,8 @@ BLACK_AIM = 0.45          # s before a black-key note the hand slides forward
 TAU_PRESS = 0.012         # key/finger easing while pressing [s]
 TAU_RELEASE = 0.032       # ... while releasing [s]
 HUD_PERIOD = 0.25         # s between HUD refreshes
+SUSTAIN_LEGATO = 0.15    # s a note rings longer when the next one overlaps
+                         # it (simple sustain pedal, C8)
 
 KEY_WHITE = (0.94, 0.94, 0.91)
 KEY_BLACK = (0.055, 0.055, 0.065)
@@ -173,7 +175,7 @@ def _write_key_matrix(m4, amount, black):
 # --------------------------------------------------------------------------- #
 class _Ev:
     __slots__ = ("t_on", "t_off", "midi", "vel", "finger", "black",
-                 "measure", "name", "fx", "key", "fired", "wx")
+                 "measure", "name", "fx", "key", "fired", "wx", "_sent_when")
 
     def __init__(self, t_on, t_off, midi, vel, finger, black, measure,
                  name, fx, wx=None):
@@ -189,6 +191,7 @@ class _Ev:
         self.wx = wx                # world x of the key this note presses
         self.key = None             # 3D key mesh name, filled on press
         self.fired = False
+        self._sent_when = None      # engine time handed to note_on (F10 fix)
 
 
 class _Player:
@@ -246,6 +249,11 @@ class VirtualKeyboard:
         self._audio_epoch = -LEAD_IN   # score time of engine time 0
         self._engine_wall = 0.0        # wall time when engine time was 0
         self._latency = 0.0            # largest output latency seen so far
+        try:
+            self.av_offset = float(os.environ.get("PIANOPLAYER_AV_MS", 0.0) or 0.0) / 1000.0
+        except (TypeError, ValueError):
+            self.av_offset = 0.0       # s; >0 means the sound is heard later
+                                       # than the image (see _prepare)
         self._underrun_seen = 0        # buffer holes already reported
         self._players = {}
         self._key_black = {}
@@ -334,6 +342,40 @@ class VirtualKeyboard:
             self.vp.interactor.SetInteractorStyle(vtkInteractorStyleUser())
         except Exception:
             pass
+
+    def _bind_view_key(self):
+        """D7: bind `v` to flip ortho top view <-> ~55° perspective view."""
+        try:
+            iren = getattr(self.vp, "interactor", None)
+            if iren is None:
+                return                      # headless: no keys to press
+            iren.AddObserver("KeyPressEvent", self._on_keypress)
+        except Exception:
+            pass
+
+    def _on_keypress(self, obj, _evt=None):
+        """D7: `v` flips the camera; every other key keeps its behaviour."""
+        try:
+            sym = obj.GetKeySym()
+        except Exception:
+            return
+        if sym in ("v", "V"):
+            self.toggle_view()
+
+    def toggle_view(self):
+        """D7: flip between orthographic top-down and ~55° perspective."""
+        self._view_persp = not getattr(self, "_view_persp", False)
+        cam = self._camera_side if self._view_persp else self._camera_top
+        try:
+            self.vp.camera = dict(cam)
+            if self._view_persp:
+                self.vp.camera.SetParallelProjection(0)
+            else:
+                self.vp.camera.SetParallelProjection(1)
+                self.vp.camera.SetParallelScale(cam.get("parallel_scale"))
+        except Exception:
+            pass
+        return self._view_persp
 
     # ------------------------------------------------------------------ scene
     def build_keyboard(self):
@@ -430,6 +472,17 @@ class VirtualKeyboard:
         if self.shadows:
             self._enable_shadows()
         self._lock_camera()
+        # D7: keep the orthographic top view and a ~55° perspective view;
+        # the `v` key flips between them (see _bind_view_key).
+        self._view_persp = False
+        self._camera_top = dict(self._camera)
+        _d = 90.0
+        self._camera_side = dict(
+            pos=(cx, -2.0 - _d * math.cos(math.radians(55.0)),
+                 1.0 + _d * math.sin(math.radians(55.0))),
+            focalPoint=(cx, -2.0, 1.0),
+            viewup=(0.0, 1.0, 0.0))
+        self._bind_view_key()
         self.vp.render()
         return self.vp
 
@@ -597,17 +650,32 @@ class VirtualKeyboard:
                 except Exception:
                     w = 1.0
 
-            # musical dynamics: the melody is louder than the accompaniment,
-            # down beats are accented, the thumb is stronger than the little
-            # finger, plus a small deterministic humanisation.
+            # musical dynamics (C8): honour the score's own velocity when the
+            # score carries one (music21 volume.velocity 0..127, as set by
+            # Dynamic marks / MIDI import); otherwise the melody is louder
+            # than the accompaniment, down beats are accented, the thumb is
+            # stronger than the little finger, plus deterministic humanisation.
+            vel = None
             try:
-                beatpos = float(getattr(n, "time_real", n.time))
-            except Exception:
-                beatpos = 0.0
-            onbeat = 1.0 - min(abs(beatpos - round(beatpos)) * 3.0, 1.0)
-            base = 0.58 if sign > 0 else 0.50
-            human = (((i * 2654435761) % 97) / 97.0) - 0.5
-            vel = base + 0.18 * onbeat + 0.10 * (w - 1.0) + 0.06 * human
+                vol = getattr(getattr(n, "note21", None), "volume", None)
+                vv = getattr(vol, "velocity", None)
+                if vv is None:
+                    vs = getattr(vol, "velocityScalar", None)
+                    if vs is not None:
+                        vel = float(vs)
+                else:
+                    vel = float(vv) / 127.0
+            except (TypeError, ValueError, AttributeError):
+                vel = None
+            if vel is None:
+                try:
+                    beatpos = float(getattr(n, "time_real", n.time))
+                except Exception:
+                    beatpos = 0.0
+                onbeat = 1.0 - min(abs(beatpos - round(beatpos)) * 3.0, 1.0)
+                base = 0.58 if sign > 0 else 0.50
+                human = (((i * 2654435761) % 97) / 97.0) - 0.5
+                vel = base + 0.18 * onbeat + 0.10 * (w - 1.0) + 0.06 * human
             vel = min(1.0, max(0.20, vel))
 
             fx = None
@@ -626,6 +694,14 @@ class VirtualKeyboard:
                            name, fx, wx))
 
         evs.sort(key=lambda e: e.t_on)
+
+        # simple sustain pedal: a note the next one overlaps (legato
+        # connection) rings a little longer.  Only a strict overlap counts:
+        # chord mates (same onset) and exactly abutting notes keep their
+        # tested durations.
+        for a, b in zip(evs, evs[1:]):
+            if a.t_on + 1e-9 < b.t_on < a.t_off - 1e-9:
+                a.t_off = a.t_off + SUSTAIN_LEGATO
 
         # never let one pitch overlap itself (one synth voice per midi)
         nxt = {}
@@ -650,11 +726,13 @@ class VirtualKeyboard:
         if self.vp is None:
             self.build_keyboard()
         try:
-            # Warm-up: the first frame of a cold window has to compile every
-            # shader and upload the geometry, which can stall for half a
-            # second and drain the audio ring before note one.  Pay that cost
-            # *before* the synth clock starts.
-            self.vp.render()
+            # Map the window and pay the cold-start cost (shader compile,
+            # geometry upload) *before* the synth clock starts: otherwise a
+            # half-second stall drains the audio ring before note one (F7).
+            self.vp.initialize_interactor()
+            self.vp.window.Render()
+            for _ in range(3):
+                self.vp.render()
         except Exception:
             pass
         self._prepare()
@@ -688,11 +766,8 @@ class VirtualKeyboard:
         before (vedo turns them into `BreakInteraction`/`TerminateApp`).
         """
         vp = self.vp
-        try:
-            vp.initialize_interactor()
-            vp.window.Render()           # map the window before looping
-        except Exception:
-            pass
+        # The window was already mapped in play(), before the synth clock
+        # started; nothing to initialise here.
         period = FPS_MS / 1000.0
         nxt = _time.perf_counter()
         frame = 0
@@ -736,7 +811,7 @@ class VirtualKeyboard:
                 rig.settle(p.notes[0].fx, {})
 
         self._stop_audio()
-        engine_wall = _time.time()
+        engine_wall = _time.perf_counter()
         if self.playsounds:
             try:
                 self.engine = SoundEngine(volume=self.volume, enabled=True)
@@ -744,7 +819,7 @@ class VirtualKeyboard:
                 # right after start(): the device is already pulling, so this
                 # is when sample 0 of the synth clock reaches the speakers
                 # (start() may spend a while pre-rendering the audio cushion)
-                engine_wall = _time.time()
+                engine_wall = _time.perf_counter()
                 if self.verbose and self.engine.backend_name != "none":
                     print("Audio backend:", self.engine.backend_name)
             except Exception as exc:
@@ -765,24 +840,33 @@ class VirtualKeyboard:
         self._hud_t = -1e9
         self._ended = False
         self._underrun_seen = 0
-        self._t0 = _time.time() + LEAD_IN
+        self._late_notes = 0       # note_ons that reached the synth past due
+        self._prev_now = -LEAD_IN  # previous frame's score time (F10 fix)
+        self._t0 = _time.perf_counter() + LEAD_IN
         # The synth counts seconds from the engine start, the score counts
         # them from _t0, and a sample rendered at engine time t only reaches
         # the speakers output_latency seconds later -- which the backend
         # *measures* (any silence the device had to pad in while priming its
         # buffer, plus the OS mixer).  Fold both offsets in, so a note written
         # at score time T is *heard* exactly when the hands play it:
-        #   when = T - _audio_epoch = T + t0 - engine_wall - latency
+        #   when = T - _audio_epoch = T + t0 - engine_wall - latency + av_offset
+        # `av_offset` (>0 = sound later than image) lets one machine be
+        # calibrated: raise it when the picture runs ahead of the sound
+        # (--av-offset-ms / PIANOPLAYER_AV_MS).
         latency = getattr(self.engine, "output_latency", 0.0) if self.engine else 0.0
         self._engine_wall = engine_wall
         self._latency = latency
-        self._audio_epoch = engine_wall + latency - self._t0
-        self._last = _time.time()
+        self._audio_epoch = (engine_wall + latency - self._t0
+                             - getattr(self, "av_offset", 0.0))
+        self._last = _time.perf_counter()
 
     def _teardown(self):
         self._stop_audio()
         if self.verbose and self._ended:
             print("End of note sequence reached.")
+        if self.verbose and getattr(self, "_late_notes", 0):
+            print("audio: %d note(s) reached the synth late (clamped to now)"
+                  % self._late_notes)
 
     def _stop_audio(self):
         if self.engine is not None:
@@ -837,11 +921,17 @@ class VirtualKeyboard:
 
         # hand the coming notes to the synthesiser --------------------------
         if engine is not None:
+            eng_now = getattr(engine, "now", None)
             while p.sched < len(notes) and notes[p.sched].t_on - now <= AUDIO_LOOKAHEAD:
                 e = notes[p.sched]
                 if e.midi is not None:
                     t_on = max(0.0, e.t_on - self._audio_epoch)
                     t_off = max(t_on + 0.02, e.t_off - self._audio_epoch)
+                    e._sent_when = t_on
+                    if eng_now is not None and t_on < eng_now - 1e-3:
+                        # already past the synth clock: SynthCore clamps it to
+                        # "now" and the sound lags behind the hands (C7)
+                        self._late_notes = getattr(self, "_late_notes", 0) + 1
                     engine.note_on(e.midi, e.vel, when=t_on, pan=p.pan)
                     engine.note_off(e.midi, when=t_off)
                 p.sched += 1
@@ -887,11 +977,59 @@ class VirtualKeyboard:
         return advance
 
     # ------------------------------------------------------------------ frame
+    def _retime_pending(self, engine, shift, prev_now):
+        """Move already-scheduled future audio events by `shift` seconds.
+
+        Called when the measured output latency grows mid-playback (F10):
+        every sample still inside the synth is heard later than planned, so
+        pending note on/off times move earlier by the same amount and stay
+        glued to the hands.  Must run *before* `_pump` schedules new notes
+        in the same frame, so everything still pending was timed with the
+        old epoch.  Only notes that have not started yet (`t_on` past the
+        previous frame) are moved: a note already sounding is committed to
+        the stream and cannot be pulled back.
+        """
+        if not shift:
+            return
+        fn = getattr(engine, "shift_pending", None)
+        if callable(fn):
+            try:
+                fn(shift)
+            except Exception:
+                pass
+            return
+        # Engines without a synth clock of their own only record the times
+        # we handed them (test doubles exposing `.sent`): rewrite the stale
+        # entries in place so the measured heard-vs-visual gap stays true.
+        sent = getattr(engine, "sent", None)
+        if not isinstance(sent, list):
+            return
+        for p in self._players.values():
+            for e in p.notes[:p.sched]:
+                old = e._sent_when
+                if old is None or e.midi is None:
+                    continue
+                if e.t_on <= prev_now:
+                    continue              # already sounding: stream committed
+                want = max(0.0, e.t_on - self._audio_epoch)
+                if abs(want - old) < 1e-12:
+                    continue
+                for i, rec in enumerate(sent):
+                    if (isinstance(rec, (tuple, list)) and len(rec) == 2
+                            and rec[0] == e.midi and rec[1] == old):
+                        sent[i] = (rec[0], want)
+                        e._sent_when = want
+                        break
+                    if isinstance(rec, (int, float)) and rec == old:
+                        sent[i] = want
+                        e._sent_when = want
+                        break
+
     def _on_timer(self, evt=None):
         if not self._playing or self.vp is None:
             return
         try:
-            t = _time.time()
+            t = _time.perf_counter()
             dt = t - self._last
             self._last = t
             if dt <= 0.0 or dt > 0.25:
@@ -907,6 +1045,8 @@ class VirtualKeyboard:
 
     def _frame(self, now, dt):
         engine = self.engine      # the synth clock runs even without a device
+        prev_now = getattr(self, "_prev_now", now)
+        self._prev_now = now
         if engine is not None:
             # Render the audio *here*, on the thread that owns the window:
             # a background thread cannot get enough of the interpreter lock
@@ -918,8 +1058,13 @@ class VirtualKeyboard:
             # grows) so notes scheduled from now on compensate for it.
             lat = engine.output_latency
             if lat > self._latency:
+                shift = -(lat - self._latency)
                 self._latency = lat
-                self._audio_epoch = self._engine_wall + lat - self._t0
+                self._audio_epoch = (self._engine_wall + lat - self._t0
+                                     - getattr(self, "av_offset", 0.0))
+                # F10: notes handed over *before* the jump would now be heard
+                # `shift` late -- move the pending ones with the stream.
+                self._retime_pending(engine, shift, prev_now)
             seen = engine.underruns
             if seen != self._underrun_seen:      # report each hole the moment
                 self._underrun_seen = seen       # it happens, with its position

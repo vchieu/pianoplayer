@@ -109,7 +109,14 @@ def reader(sf, beam=0):
             an.time_real = off
             an.dur_real  = ql
             an.isBlack  = p.pitchClass in (1, 3, 6, 8, 10)
-            if n.lyrics: an.fingering = n.lyric
+            if n.lyrics:
+                # a lyric line is free text: only honour a real 1..5 hint,
+                # anything else leaves the fingering open (0) for generate()
+                try:
+                    lv = int(str(n.lyric).strip())
+                except (ValueError, TypeError):
+                    lv = 0
+                an.fingering = lv if 1 <= lv <= 5 else 0
             if tie is not None and tie.type == 'start':
                 pending[midi] = an
             noteseq.append(an)
@@ -123,17 +130,22 @@ def reader(sf, beam=0):
                 if _absorb(midi, tie, ql) or midi in at_off:
                     continue
                 at_off.add(midi)
-                kept.append((cn, midi, tie))
+                noteobj = cnotes[j] if j < len(cnotes) else None
+                kept.append((cn, noteobj, midi, tie))
             if not kept:
                 continue
 
-            for j, (cn, midi, tie) in enumerate(kept):
+            for j, (cn, noteobj, midi, tie) in enumerate(kept):
                 an          = INote()
                 an.chordID  = chordID
                 an.noteID  += 1
-                an.isChord  = True
+                # a chord whose other pitches were all absorbed by ties is
+                # down to one sounding pitch: not a chord anymore (F6), but
+                # keep chord21/chordnr around. Its note21 must be the real
+                # Note (a Pitch has no articulations/lyrics for generate()).
+                an.isChord  = len(kept) > 1
                 an.chord21  = n
-                an.note21   = cn
+                an.note21   = cn if len(kept) > 1 else (noteobj if noteobj is not None else cn)
                 an.name     = cn.name
                 an.chordnr  = j
                 an.NinChord = len(kept)
@@ -151,7 +163,7 @@ def reader(sf, beam=0):
 
             chordID += 1
 
-    if len(noteseq)<2:
+    if len(noteseq)<1:
         print("Beam is empty.")
         return []
     return noteseq

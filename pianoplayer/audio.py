@@ -55,12 +55,19 @@ except Exception:  # pragma: no cover - optional dependency
 
 SAMPLE_RATE = 44100
 
-_MAX_PARTIALS = 40     # hard cap of partials used by each note
+_MAX_PARTIALS = 24     # hard cap of partials used by each note (C5: was 40;
+                       # partials above ~9 kHz cost oscillators but no timbre)
+_MIN_PARTIALS = 8      # ... but always keep at least this many
 _BEAT_PARTIALS = 2     # lowest partials played by 2 mistuned strings
 _DETUNE = 0.00016      # ~0.3 cent, gives the natural "chorus" of a piano
 _STRIKE_POS = 0.115    # hammer position along the string (0..1)
 _TAU_REL = 0.085       # nominal damper time [s]
+_TAU_KILL = 0.005      # smooth-steal fade time [s]: a stolen voice dies in
+                       # ~5 ms instead of being cut mid-period (C6)
 _LN1000 = math.log(1000.0)
+_FAST_KILL_RATE = _LN1000 / _TAU_KILL
+_MAX_DYING_VOICES = 8  # stolen voices may exceed `polyphony` by this many (C6)
+_PARTIAL_FLOOR = 1e-3  # a partial quieter than this leaves the mix (C5)
 
 
 ############################################################ note helpers
@@ -109,7 +116,7 @@ def _note_params(midi: int) -> dict:
 
     # enough partials to reach ~9 kHz (never more than the cap, so that a
     # bass note does not cost 150 oscillators)
-    nmax = int(np.clip(9000.0 / max(f0, 20.0), 10, _MAX_PARTIALS))
+    nmax = int(np.clip(9000.0 / max(f0, 20.0), _MIN_PARTIALS, _MAX_PARTIALS))
     n = np.arange(1, nmax + 1, dtype=float)
     f = f0 * n * np.sqrt(1.0 + B * n * n)
 
@@ -135,7 +142,11 @@ def _note_params(midi: int) -> dict:
     if peak > 0:
         amps = amps / peak
 
-    params = dict(freqs=freqs, amps=amps, rates=rates, rel_rate=rel_rate,
+    # float32 throughout: halves the memory traffic of the per-block sin/exp
+    # matrices in _mix, at ~1e-7 relative precision (C5 step 1)
+    f32 = lambda a: np.ascontiguousarray(a, dtype=np.float32)
+    params = dict(freqs=f32(freqs), amps=f32(amps), rates=f32(rates),
+                  rel_rate=f32(rel_rate),
                   n_all=partial_n, f0=f0, t60=t60)
     _NOTE_CACHE[midi] = params
     return params
@@ -145,7 +156,8 @@ def _note_params(midi: int) -> dict:
 class _Voice:
     """A single sounding note (one key press)."""
     __slots__ = ("midi", "params", "amps", "start_frame", "rel_frame",
-                 "pan_l", "pan_r", "noise", "gain")
+                 "pan_l", "pan_r", "noise", "gain", "full_until",
+                 "fast_kill")
 
     def __init__(self, midi, velocity, start_frame, pan, sr, gain=1.0):
         self.midi = midi
@@ -159,8 +171,16 @@ class _Voice:
         # what the output level really is, so a note can never blow up
         self.amps = amps / (float(np.sum(amps)) or 1.0)
 
+        # time until the first partial decays below _PARTIAL_FLOOR: before
+        # this (and while no damper is on) the whole set is alive, so _mix
+        # can skip the gate test and the index copies (C5 step 3)
+        with np.errstate(divide="ignore"):
+            t_drop = np.log(self.amps / _PARTIAL_FLOOR) / p["rates"]
+        self.full_until = float(np.min(t_drop))
+
         self.start_frame = start_frame
         self.rel_frame = None
+        self.fast_kill = False   # C6: dying after a smooth voice steal
 
         self.gain = (0.18 + 0.82 * v) ** 1.6 * gain
         c = 0.35 * pan
@@ -179,7 +199,8 @@ class _Voice:
             nz[:ramp] *= np.linspace(0.0, 1.0, ramp)   # no click at onset
         nz *= np.exp(-np.arange(nn) / (0.010 * sr))
         thump = min(1.0 + 0.8 * (200.0 / max(p["f0"], 40.0)), 2.0)
-        self.noise = nz * (0.55 * (0.35 + 0.65 * v) * thump)
+        self.noise = np.ascontiguousarray(
+            nz * (0.55 * (0.35 + 0.65 * v) * thump), dtype=np.float32)
 
     # ----------------------------------------------------------
     def energy_at(self, frame: int) -> float:
@@ -190,6 +211,8 @@ class _Voice:
             tr = (frame - self.rel_frame) / 44100.0
             if tr > 0:
                 e *= math.exp(-60.0 * tr)
+                if self.fast_kill:
+                    e *= math.exp(-_FAST_KILL_RATE * tr)
         return e * float(np.max(self.amps)) * self.gain
 
     def alive_at(self, frame: int) -> bool:
@@ -271,9 +294,18 @@ class SynthCore:
         return out
 
     def _spawn(self, midi, vel, pan, frame):
-        if len(self.voices) >= self.polyphony:
-            weakest = min(self.voices, key=lambda v: v.energy_at(self.frame))
-            self.voices.remove(weakest)
+        live = [v for v in self.voices if not v.fast_kill]
+        if len(live) >= self.polyphony:
+            # smooth steal (C6): fade the weakest live voice over ~5 ms
+            # instead of cutting it mid-period (heard as a click)
+            weakest = min(live, key=lambda v: v.energy_at(self.frame))
+            weakest.rel_frame = frame
+            weakest.fast_kill = True
+        dying = [v for v in self.voices if v.fast_kill]
+        if len(dying) > _MAX_DYING_VOICES:
+            dying.sort(key=lambda v: v.energy_at(self.frame))
+            for v in dying[:len(dying) - _MAX_DYING_VOICES]:
+                self.voices.remove(v)
         self.voices.append(_Voice(midi, vel, frame, pan, self.sr))
 
     def _release(self, midi, frame):
@@ -292,6 +324,31 @@ class SynthCore:
                     v.rel_frame = frame
                 return
 
+    def shift_pending(self, delta_sec):
+        """Move every scheduled-but-unsounded event by `delta_sec` (F10).
+
+        When the measured output latency grows mid-playback, every sample
+        still inside the synth is heard later than planned; shifting the
+        pending note on/off times by the same (negative) amount keeps them
+        glued to the animation.  Returns the number of events moved.
+        """
+        dframes = int(round(float(delta_sec) * self.sr))
+        if dframes == 0:
+            return 0
+        queued = []
+        try:
+            while True:
+                queued.append(self._pending.get_nowait())
+        except queue.Empty:
+            pass
+        for (fr, seq, kind, midi, vel, pan) in queued:
+            self._pending.put((fr + dframes, seq, kind, midi, vel, pan))
+        if self._events:
+            self._events = [(fr + dframes, seq, kind, midi, vel, pan)
+                            for (fr, seq, kind, midi, vel, pan) in self._events]
+            heapq.heapify(self._events)
+        return len(queued) + len(self._events)
+
     def _mix(self, out, offset, length):
         if length <= 0:
             return
@@ -301,28 +358,71 @@ class SynthCore:
 
         sr = float(self.sr)
         start = self.frame
-        t_base = np.arange(length, dtype=float) / sr
-        left = np.zeros(length)
-        right = np.zeros(length)
+        # float32 time base and accumulators (C5 step 1)
+        t_base = np.arange(length, dtype=np.float32) / np.float32(sr)
+        left = np.zeros(length, dtype=np.float32)
+        right = np.zeros(length, dtype=np.float32)
         alive = []
+        two_pi = np.float32(2.0 * np.pi)
 
         for v in self.voices:
             p = v.params
             t0 = max((start - v.start_frame) / sr, 0.0)
-            t = t0 + t_base
+            t = np.float32(t0) + t_base
 
-            # --- envelope ------------------------------------------------
-            env = np.minimum(t / 0.004, 1.0)                # smooth 4 ms attack
-            env = env * env * (3.0 - 2.0 * env)             # smooth step
-            env = env[None, :] * np.exp(-p["rates"][:, None] * t[None, :])
-
+            rel = -1.0
             if v.rel_frame is not None:
                 rel = (start - v.rel_frame) / sr
-                if rel >= 0.0:                              # damper is on
-                    env = env * np.exp(-p["rel_rate"][:, None] * rel)
 
-            sig = np.sin(p["freqs"][:, None] * (2.0 * np.pi) * t[None, :])
-            sig = v.gain * (v.amps[:, None] * env * sig).sum(axis=0)
+            # --- active partials (C5 step 3): at the block start, drop every
+            # --- partial whose current amplitude is below _PARTIAL_FLOOR;
+            # --- it only decays further inside this block.  Young,
+            # --- unreleased voices keep the whole set with no test at all.
+            if rel < 0.0 and t0 < v.full_until:
+                freqs = p["freqs"]
+                amps = v.amps
+                rates = p["rates"]
+                rel_rate = p["rel_rate"]
+                have = True
+            else:
+                gate = v.amps * np.exp(-p["rates"] * np.float32(t0))
+                if rel >= 0.0:                   # damper is on
+                    gate = gate * np.exp(-p["rel_rate"] * np.float32(rel))
+                    if v.fast_kill:              # stolen: shed partials fast
+                        gate = gate * np.exp(np.float32(-_FAST_KILL_RATE)
+                                             * np.float32(rel))
+                idx = np.nonzero(gate >= np.float32(_PARTIAL_FLOOR))[0]
+                have = idx.size > 0
+                if have:
+                    freqs = p["freqs"][idx]
+                    amps = v.amps[idx]
+                    rates = p["rates"][idx]
+                    rel_rate = p["rel_rate"][idx]
+
+            if have:
+                # --- envelope --------------------------------------------
+                if t0 >= 0.004:
+                    env = np.float32(1.0)        # attack long past: all ones
+                else:                            # smooth 4 ms attack ...
+                    env = np.minimum(t / np.float32(0.004), np.float32(1.0))
+                    env = env * env * (np.float32(3.0) - np.float32(2.0) * env)
+                env = env * np.exp(-rates[:, None] * t[None, :])
+
+                if rel >= 0.0:                   # damper is on
+                    env = env * np.exp(-rel_rate[:, None]
+                                       * np.float32(rel))
+                    if v.fast_kill:
+                        # stolen: extra ~5 ms fade.  Per-sample, not per
+                        # block: the fade is shorter than one render chunk,
+                        # so a block-constant factor would just postpone the
+                        # cut by a block instead of smoothing it.
+                        env = env * np.exp(np.float32(-_FAST_KILL_RATE)
+                                           * (np.float32(rel) + t_base)[None, :])
+
+                sig = np.sin(freqs[:, None] * two_pi * t[None, :])
+                sig = np.float32(v.gain) * (amps[:, None] * env * sig).sum(axis=0)
+            else:
+                sig = np.zeros(length, dtype=np.float32)
 
             # --- hammer transient ---------------------------------------
             i0 = int(t0 * sr)
@@ -331,8 +431,8 @@ class SynthCore:
                 if len(chunk):
                     sig[:len(chunk)] += chunk
 
-            left += sig * v.pan_l
-            right += sig * v.pan_r
+            left += sig * np.float32(v.pan_l)
+            right += sig * np.float32(v.pan_r)
 
             if v.alive_at(start + length):
                 alive.append(v)
@@ -409,6 +509,12 @@ class _CushionBackend:
         float(os.environ["PIANOPLAYER_LATENCY_MS"]) / 1000.0
         if os.environ.get("PIANOPLAYER_LATENCY_MS") else None)
     IDLE_PUMP = 0.40        # feeder only takes over after this long unserved
+    # Adaptive render budget (C5 step 4): a full ring only needs a top-up,
+    # while a starving ring may spend a whole frame refilling.  The budget
+    # is picked from the ring level, so a normal frame costs ~8 ms and only
+    # a ring below 25% may use up to 60 ms.
+    PUMP_BUDGET_FULL = 0.008    # ring above 50%: top-up only
+    PUMP_BUDGET_EMPTY = 0.060   # ring below 25%: refill at any cost
 
     def __init__(self, synth: SynthCore, volume_getter):
         self.synth = synth
@@ -419,7 +525,7 @@ class _CushionBackend:
         self._partial = b""          # tail of the chunk being consumed
         self._lock = threading.Lock()
         self._render_lock = threading.Lock()   # one renderer at a time
-        self._last_pump = time.time()
+        self._last_pump = time.perf_counter()
         self._stop = threading.Event()
         self._thread = None
 
@@ -461,7 +567,7 @@ class _CushionBackend:
         with self._lock:
             return len(self._chunks) * self.CHUNK + len(self._partial) // 4
 
-    def pump(self, budget=0.060) -> int:
+    def pump(self, budget=None) -> int:
         """
         Render audio ahead from the **calling** thread (the animation loop).
 
@@ -469,14 +575,26 @@ class _CushionBackend:
         feeder happens to hold the render lock we simply try again on the
         next frame, which also makes a deadlock impossible.
 
-        The budget is generous on purpose: one slow frame has to be able to
-        refill the whole cushion in a single call, otherwise a stall is
-        turned into a permanent deficit (heard as stuttering).
+        With `budget=None` (the default) the budget adapts to the ring
+        level: 8 ms while the ring is over half full, up to 60 ms when it
+        drops under a quarter, so one slow frame can still refill the whole
+        cushion in a single call instead of turning a stall into a
+        permanent deficit (heard as stuttering).
         """
-        self._last_pump = time.time()
+        self._last_pump = time.perf_counter()
         target = self._target()
-        if self._buffered() >= target:
+        buffered = self._buffered()
+        if buffered >= target:
             return 0
+        if budget is None:
+            frac = buffered / max(target, 1)
+            if frac >= 0.50:
+                budget = self.PUMP_BUDGET_FULL
+            elif frac <= 0.25:
+                budget = self.PUMP_BUDGET_EMPTY
+            else:                       # linear interpolation between the two
+                budget = (self.PUMP_BUDGET_EMPTY + (self.PUMP_BUDGET_FULL
+                          - self.PUMP_BUDGET_EMPTY) * (frac - 0.25) / 0.25)
         if not self._render_lock.acquire(blocking=False):
             return 0
         made = 0
@@ -494,7 +612,7 @@ class _CushionBackend:
     def _feed(self):
         """Fallback renderer for an engine nobody pumps (see `pump()`)."""
         while not self._stop.is_set():
-            if (time.time() - self._last_pump < self.IDLE_PUMP
+            if (time.perf_counter() - self._last_pump < self.IDLE_PUMP
                     or self._buffered() >= self._target()):
                 time.sleep(0.05)
                 continue
@@ -742,7 +860,7 @@ class SoundEngine:
         """Seconds between a sample being rendered and being heard."""
         return float(getattr(self._backend, "output_latency", 0.0))
 
-    def pump(self, budget=0.060) -> int:
+    def pump(self, budget=None) -> int:
         """
         Render audio into the playback buffer ahead of time.
 
@@ -784,6 +902,13 @@ class SoundEngine:
 
     def all_notes_off(self):
         self.synth.all_notes_off()
+
+    def shift_pending(self, delta_sec):
+        """Move pending note on/off events (see `SynthCore.shift_pending`)."""
+        try:
+            return int(self.synth.shift_pending(delta_sec))
+        except Exception:
+            return 0
 
     # ----------------------------------------------------------- offline
     def render(self, events, seconds) -> np.ndarray:
