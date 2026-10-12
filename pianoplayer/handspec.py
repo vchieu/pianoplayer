@@ -245,6 +245,42 @@ HANDMESH_VERSION = "v4"  # v4: thumb MCP base matches the rig (was /hf off),
                          # v3: SDF v2 (elliptical sections, pad tips, y-web)
 
 
+# --------------------------------------------------------------------------- #
+# F4a: chord span limits (cm at hf=1, right hand).  MAX_SPAN is the hard
+# limit (HARD cost beyond), COMFORT_SPAN is where quadratic cost starts.
+# Symmetric: MAX_SPAN[fa][fb] == MAX_SPAN[fb][fa].
+MAX_SPAN = {
+    1: {2: 7.0, 3: 9.0, 4: 11.0, 5: 13.0},
+    2: {1: 7.0, 3: 5.5, 4: 8.0, 5: 11.0},
+    3: {1: 9.0, 2: 5.5, 4: 5.5, 5: 8.0},
+    4: {1: 11.0, 2: 8.0, 3: 5.5, 5: 5.5},
+    5: {1: 13.0, 2: 11.0, 3: 8.0, 4: 5.5},
+}
+COMFORT_SPAN = {
+    1: {2: 5.0, 3: 6.5, 4: 8.0, 5: 9.5},
+    2: {1: 5.0, 3: 4.0, 4: 6.0, 5: 8.5},
+    3: {1: 6.5, 2: 4.0, 4: 4.0, 5: 6.0},
+    4: {1: 8.0, 2: 6.0, 3: 4.0, 5: 4.0},
+    5: {1: 9.5, 2: 8.5, 3: 6.0, 4: 4.0},
+}
+
+# F5: crossing costs.  CROSS_BASE[fa][fb] for fa < fb (higher finger over
+# lower).  Applied when (fb - fa) * xba < 0 (crossing).  Cost = CROSS_BASE *
+# max(1, semitone_interval / 3) * max(1, 0.2 / dt_sec).  Thumb-under uses
+# UNDER[fa] where fb=1 (thumb) passes under fa.
+CROSS_BASE = {
+    (2, 3): 1.5, (2, 4): 2.0, (2, 5): 2.5,
+    (3, 4): 1.2, (3, 5): 1.8,
+    (4, 5): 1.0,
+}
+UNDER = {2: 1.5, 3: 1.0, 4: 2.0, 5: 3.0}  # thumb-under cost after finger
+
+# F6: static black/white preference per finger (added to pair_cost, not
+# multiplied by velocity).  Positive = penalty for black keys.
+BLACK_COST = {1: 0.5, 2: 0.1, 3: 0.0, 4: 0.1, 5: 0.3}
+WHITE_COST = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+
+
 def geom_hash():
     """8-char sha1 over geometry + SDF constants + grid + version (R1.4).
 
@@ -264,5 +300,6 @@ def geom_hash():
                 PIP_MOUND, DIP_MOUND, MCP_MOUND_R, PALM_ARCH, WEB_K,
                 WEB_Y_LO, WEB_Y_HI, THUMB_WEB_K, THUMB_WEB_FRAC,
                 K_INTRA, K_PALM, K_CMC, K_BODY, GRID_STEP, GRID_Y0,
-                TRIS_MAX, HANDMESH_VERSION))
+                TRIS_MAX, HANDMESH_VERSION,
+                MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST))
     return hashlib.sha1(rep.encode()).hexdigest()[:8]

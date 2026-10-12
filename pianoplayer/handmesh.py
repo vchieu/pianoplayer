@@ -427,6 +427,120 @@ def _finger_capsules(hf, chains):
     return out
 
 
+# Baked AO parameters
+_AO_EPS = 0.3      # cm offset along normal for AO sampling
+_AO_SCALE = 0.5    # scale for AO contrast (tuned so max raw ~0.47 maps to ~1.0)
+_AO_CLAMP_LO = 0.75
+_AO_CLAMP_HI = 1.0
+
+
+def _eval_sdf_at_points(pts, hf):
+    """Evaluate the hand SDF at arbitrary points (not on grid).
+    
+    Uses the same primitive combination as _build_sdf but evaluates
+    directly at the given points. Returns SDF values (negative = inside).
+    """
+    from pianoplayer import handspec as H
+    hf = float(hf)
+    chains, cmc_a = rest_chains(hf)
+    body_ell = _body_ellipsoids(hf)
+    raw_caps = _finger_capsules(hf, chains)
+    fing_caps = {}
+    for f, (segs, spheres, pads) in raw_caps.items():
+        fing_caps[f] = (segs, spheres, pads)
+    
+    # Evaluate all primitives at the query points
+    pts = np.asarray(pts, np.float32)
+    N = pts.shape[0]
+    INF = np.full(N, np.inf, np.float32)
+    
+    # Body ellipsoids
+    acc_body = INF.copy()
+    for (c, r) in body_ell:
+        c = np.asarray(c, np.float32)
+        r = np.asarray(r, np.float32)
+        d = _ellipsoid(pts, c, r)
+        acc_body = _smin(acc_body, d, _K_BODY)
+    
+    # Finger capsules/spheres/pads
+    acc_f = {}
+    for f in H.FINGERS:
+        acc = INF.copy()
+        segs, spheres, pads = fing_caps[f]
+        for (a, b, r0, r1, az) in segs:
+            a = np.asarray(a, np.float32)
+            b = np.asarray(b, np.float32)
+            d = _capsule_ell(pts, a, b, float(r0), float(r1), float(az))
+            acc = _smin(acc, d, _K_INTRA)
+        for (c, r) in spheres:
+            c = np.asarray(c, np.float32)
+            d = np.linalg.norm(pts - c[None, :], axis=1).astype(np.float32) - np.float32(r)
+            acc = _smin(acc, d, _K_INTRA)
+        for (c, r) in pads:
+            c = np.asarray(c, np.float32)
+            r = np.asarray(r, np.float32)
+            d = _ellipsoid(pts, c, r)
+            acc = _smin(acc, d, _K_INTRA)
+        acc_f[f] = acc
+    
+    # Thumb CMC
+    q1 = chains[1][0]
+    r_cmc = 1.15 * hf
+    r_mcp1 = H.finger_radius(1, 0) * hf
+    acc_cmc = _capsule(pts, cmc_a, q1, r_cmc, r_mcp1)
+    
+    # Webbing
+    y_kn = 8.2 * hf
+    w_web = _smoothstep(y_kn + H.WEB_Y_LO * hf - 0.5 * hf,
+                        y_kn + H.WEB_Y_LO * hf, pts[:, 1]) * \
+            (1.0 - _smoothstep(y_kn + H.WEB_Y_HI * hf,
+                               y_kn + H.WEB_Y_HI * hf + 0.5 * hf, pts[:, 1]))
+    d2345_min = np.minimum(np.minimum(acc_f[2], acc_f[3]),
+                           np.minimum(acc_f[4], acc_f[5]))
+    d2345_s = _smin(_smin(acc_f[2], acc_f[3], H.WEB_K),
+                    _smin(acc_f[4], acc_f[5], H.WEB_K), H.WEB_K)
+    d_2345 = _blend(w_web, d2345_s, d2345_min)
+    
+    # Thumb-index web
+    w_th = _smoothstep(2.0 * hf, 3.5 * hf, pts[:, 1]) * \
+        (1.0 - _smoothstep(8.0 * hf, 9.5 * hf, pts[:, 1]))
+    d1i_s = _smin(acc_f[1], d2345_min, H.THUMB_WEB_K)
+    d_1 = _blend(w_th, d1i_s, np.minimum(acc_f[1], d2345_min))
+    
+    # Combine all
+    d_hand = _smin(_smin(acc_body, acc_cmc, _K_CMC), d_2345, _K_PALM)
+    d_hand = _smin(d_hand, d_1, _K_PALM)
+    
+    return d_hand.astype(np.float32)
+
+
+def _compute_baked_ao(pts, nrm, hf):
+    """Compute baked ambient occlusion for mesh vertices.
+    
+    Samples SDF at v + eps*n and v - eps*n along normals.
+    Note: mesh normals point INWARD (see _tube_faces), so:
+    - pts_out = v - eps*n goes OUTSIDE (d > 0)
+    - pts_in = v + eps*n goes INSIDE (d < 0)
+    SDF is negative inside, positive outside.
+    ao = clamp((d_out - d_in) / scale, 0.75, 1.0)
+    Returns per-vertex AO factor in [0.75, 1.0].
+    """
+    eps = _AO_EPS
+    # Outside (opposite normal, since normals point inward)
+    pts_out = pts - eps * nrm
+    # Inside (along normal)
+    pts_in = pts + eps * nrm
+    
+    d_out = _eval_sdf_at_points(pts_out, hf)
+    d_in = _eval_sdf_at_points(pts_in, hf)
+    
+    # AO factor: higher = more occluded (darker)
+    # d_out (outside) > 0, d_in (inside) < 0 -> d_out - d_in = large positive
+    ao = (d_out - d_in) / _AO_SCALE
+    ao = np.clip(ao, _AO_CLAMP_LO, _AO_CLAMP_HI)
+    return ao.astype(np.float32)
+
+
 def _build_sdf(hf):
     chains, cmc_a = rest_chains(hf)
     f32 = lambda a: np.asarray(a, np.float32)
@@ -657,10 +771,13 @@ def build_rest_mesh(hf, side="right"):
         pts = pts * np.array([-1.0, 1.0, 1.0])
         nrm = nrm * np.array([-1.0, 1.0, 1.0])
         faces = [tuple(reversed(f)) for f in faces]
+    # R4: baked AO - sample SDF along normals
+    ao = _compute_baked_ao(np.asarray(pts, float), np.asarray(nrm, float), float(hf))
     try:
         np.savez_compressed(path, rest_pts=np.asarray(pts, np.float32),
                             faces=np.asarray(faces, np.int64),
-                            rest_nrm=np.asarray(nrm, np.float32))
+                            rest_nrm=np.asarray(nrm, np.float32),
+                            rest_ao=np.asarray(ao, np.float32))
     except Exception:
         pass
     return pts, faces, nrm
@@ -755,15 +872,48 @@ def compute_weights(rest_pts, bones, rigid_names=("forearm", "palm"),
 
 
 def get_rest_data(hf, side="right"):
-    """Full cached rest set: pts/faces/nrm/idx/w/bones/names/P0/R0."""
+    """Full cached rest set: pts/faces/nrm/idx/w/bones/names/P0/R0/ao.
+
+    Load order:
+    1. Package data (prebuilt meshes bundled with pip install)
+    2. User cache dir (~/.cache/pianoplayer/)
+    3. Build from scratch (first run without prebuilt data)
+    """
     s = "left" if str(side).lower().startswith("l") else "right"
-    path = cache_path(hf, s)
     bones, names = rest_bones(hf, s)
     _, _, P0, R0 = rest_frames(hf, s)
+    hf_s = f"{float(hf):.2f}"
+    hash8 = H.geom_hash()[:8]
+
+    # 1. Try package data first (importlib.resources, works for installed pkg)
+    pkg_mesh = f"handmesh_{s}_{hf_s}_{hash8}.npz"
+    try:
+        from importlib.resources import files as _files
+        pkg_path = _files("pianoplayer.data").joinpath(pkg_mesh)
+        if pkg_path.is_file():
+            with pkg_path.open("rb") as f:
+                z = np.load(f, allow_pickle=False)
+                if {"rest_pts", "faces", "rest_nrm", "idx", "w"} <= set(z.files):
+                    ao = np.array(z.get("rest_ao", np.ones_like(z["rest_pts"][:, 0])), float)
+                    return dict(
+                        pts=np.array(z["rest_pts"], float),
+                        faces=[tuple(int(v) for v in row)
+                               for row in np.array(z["faces"], np.int64)],
+                        nrm=np.array(z["rest_nrm"], float),
+                        idx=np.array(z["idx"], np.int16),
+                        w=np.array(z["w"], np.float32),
+                        ao=ao,
+                        bones=bones, names=names, P0=P0, R0=R0)
+    except Exception:
+        pass
+
+    # 2. Try user cache dir
+    path = cache_path(hf, s)
     z = _load_cache(path)
     if z is not None:
         try:
             if {"rest_pts", "faces", "rest_nrm", "idx", "w"} <= set(z.files):
+                ao = np.array(z.get("rest_ao", np.ones_like(z["rest_pts"][:, 0])), float)
                 return dict(
                     pts=np.array(z["rest_pts"], float),
                     faces=[tuple(int(v) for v in row)
@@ -771,10 +921,18 @@ def get_rest_data(hf, side="right"):
                     nrm=np.array(z["rest_nrm"], float),
                     idx=np.array(z["idx"], np.int16),
                     w=np.array(z["w"], np.float32),
+                    ao=ao,
                     bones=bones, names=names, P0=P0, R0=R0)
         except Exception:
             pass
+
+    # 3. Build from scratch
     pts, faces, nrm = build_rest_mesh(hf, s)
+    # Load AO from the cache we just wrote
+    z2 = _load_cache(path)
+    ao = np.ones(pts.shape[0], float)
+    if z2 is not None and "rest_ao" in z2:
+        ao = np.array(z2["rest_ao"], float)
     y_kn = 8.2 * float(hf)
     idx, w = compute_weights(np.asarray(pts, float), bones, names=names,
                              hf=hf,
@@ -785,11 +943,13 @@ def get_rest_data(hf, side="right"):
                             faces=np.array(faces, np.int64),
                             rest_nrm=np.asarray(nrm, np.float32),
                             idx=np.asarray(idx, np.int16),
-                            w=np.asarray(w, np.float32))
+                            w=np.asarray(w, np.float32),
+                            rest_ao=np.asarray(ao, np.float32))
     except Exception:
         pass
     return dict(pts=np.array(pts, float), faces=faces,
                 nrm=np.array(nrm, float), idx=idx, w=w,
+                ao=ao,
                 bones=bones, names=names, P0=P0, R0=R0)
 
 
@@ -891,17 +1051,34 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
                    fill=(130, 75, 65, 55), width=3)
         except Exception:
             pass
-    # nails: pinkish ellipse with a whiter tip + cuticle arc
+    # nails: pinkish ellipse with a whiter tip + cuticle arc (R4: boost contrast)
     for f, t in tips.items():
         try:
             r = 0.62 * float(hf)
             x0, y0 = to_px(t[0] - r, t[1] - 1.15 * float(hf))
             x1, y1 = to_px(t[0] + r, t[1] - 0.10 * float(hf))
-            dr.ellipse([x0, y0, x1, y1], fill=(247, 209, 189, 255))
-            dr.ellipse([x0 + 3, y0 + 2, x1 - 3, y0 + (y1 - y0) * 0.45],
-                       fill=(252, 238, 230, 255))
-            dr.arc([x0, y0, x1, y1], 100, 260, fill=(150, 90, 80, 120),
+            # Base nail color (within 8% of skin tone)
+            skin_r, skin_g, skin_b = 247, 209, 189  # base skin-ish
+            # Brighter rim (lunula area) - 8% lighter
+            rim_r, rim_g, rim_b = min(255, int(skin_r * 1.08)), min(255, int(skin_g * 1.08)), min(255, int(skin_b * 1.08))
+            # Whiter tip - 6% lighter than rim
+            tip_r, tip_g, tip_b = min(255, int(rim_r * 1.06)), min(255, int(rim_g * 1.06)), min(255, int(rim_b * 1.06))
+            # Cuticle - 10% darker
+            cut_r, cut_g, cut_b = int(skin_r * 0.9), int(skin_g * 0.9), int(skin_b * 0.9)
+            
+            dr.ellipse([x0, y0, x1, y1], fill=(skin_r, skin_g, skin_b, 255))
+            # Lunula (proximal half-moon) - slightly lighter
+            dr.ellipse([x0 + 2, y0 + 2, x1 - 2, y0 + (y1 - y0) * 0.55],
+                       fill=(rim_r, rim_g, rim_b, 255))
+            # Tip highlight - brightest
+            dr.ellipse([x0 + 4, y0 + (y1 - y0) * 0.55, x1 - 4, y1 - 2],
+                       fill=(tip_r, tip_g, tip_b, 255))
+            # Cuticle arc - darker
+            dr.arc([x0, y0, x1, y1], 100, 260, fill=(cut_r, cut_g, cut_b, 180),
                    width=2)
+            # Subtle rim highlight
+            dr.arc([x0 + 1, y0 + 1, x1 - 1, y1 - 1], 270, 90, fill=(tip_r, tip_g, tip_b, 100),
+                   width=1)
         except Exception:
             pass
     arr = np.asarray(pil).astype(np.float32) / 255.0

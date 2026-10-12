@@ -398,10 +398,12 @@ class VirtualKeyboard:
         except Exception:
             pass
         # H3: blob shadows only make sense in the top-down ortho view.
+        # R4: disable texture in perspective view (use vertex colors instead)
         try:
             for rig in (getattr(self, "RH", None), getattr(self, "LH", None)):
                 if rig is not None:
                     rig.set_shadows_visible(not self._view_persp)
+                    rig.set_texture_enabled(not self._view_persp)
         except Exception:
             pass
         return self._view_persp
@@ -1118,14 +1120,9 @@ class VirtualKeyboard:
                         newv = tgt
                     p.press[f] = newv
 
-            # R1.8 caller side: _pump already stores p.aim_fingers (fingers
-            # striking within AIM_LEAD). It is NOT passed to the rig yet:
-            # without the rig-side idle spring (Track R R1.8) the early
-            # aiming measurably worsens steady-state hold tip_err
-            # (p95 1.41 -> 2.36 cm in test_play.py). Track R flips this
-            # switch together with the spring dynamics.
             p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
-                         held={f for f in FINGERS if p.active.get(f)})
+                         held={f for f in FINGERS if p.active.get(f)},
+                         aim_fingers=p.aim_fingers)
 
         self._sync_keys(dt)
         self._hud_update(now)

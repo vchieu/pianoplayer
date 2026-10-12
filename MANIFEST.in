@@ -1,2 +1,3 @@
 include scores/*
 include bin/*
+include pianoplayer/data/*

@@ -144,15 +144,94 @@ def test_texture_fallback():
           "bogus texture: actor colour %s != SKIN %s" % (col, SKIN))
     import numpy as _np
     sc = _np.asarray(rig._skin["blush"][0], float) / 255.0
-    check(all(abs(c - s) < 1 / 255 + 1e-9 for c, s in zip(sc, SKIN)),
-          "bogus texture: vertex base %s != SKIN %s" % (tuple(sc), SKIN))
-    print("   texture: bogus path keeps SKIN %s" % (col,))
+    # R4: with baked AO + skin shading, vertex base is SKIN * AO * shading
+    # not pure SKIN. Check it's in the expected range (SKIN * 0.75 .. 1.15)
+    for c, s in zip(sc, SKIN):
+        check(s * 0.7 < c < s * 1.2,
+              "bogus texture: vertex base %s not in SKIN*AO*shading range" % (tuple(sc),))
+    print("   texture: bogus path keeps SKIN*AO*shading %s" % (tuple(sc),))
     rig_ok = HandRig(side="right", size="M", mesh="skinned")
     check(rig_ok._skin is not None, "default-texture rig lost its skin")
     col_ok = tuple(rig_ok._skin["mesh"].actor.GetProperty().GetColor())
     check(all(abs(c - 1.0) < 1e-6 for c in col_ok),
           "default texture: actor colour %s != white" % (col_ok,))
     print("   texture: default path yields white %s" % (col_ok,))
+
+
+def test_finger_smoothing():
+    """R1.8: idle fingers glide (<=1.2 cm/frame @60fps), aim/held fingers exact."""
+    import numpy as np
+    from pianoplayer.hand3d import FINGERS, HandRig
+
+    rig = HandRig("right", "M", mesh="tubes")
+    fan = rig._neutral_x()
+    rig.settle(dict(fan), {})
+    tip0 = {f: rig._geom[f]["pts"][-1].copy() for f in FINGERS}
+
+    # 1. Idle finger: fan target moves 6 cm, finger should glide smoothly
+    far = dict(fan)
+    far[2] = float(fan[2] + 6.0)
+    rig.update(1.0 / 60.0, far, {})
+    tip1 = rig._geom[2]["pts"][-1]
+    dx = abs(float(tip1[0]) - float(tip0[2][0]))
+    check(dx <= 1.2, "idle finger teleports %.2f cm in one frame" % dx)
+
+    # 2. Aim finger: enters aim_set, _sx snaps to key_x (no spring).
+    # Physical convergence takes a few frames (like pressed fingers).
+    rig.settle(dict(fan), {})  # back to natural
+    key_x = float(fan[3] + 3.0)  # key 3 cm right of natural
+    aim_fan = dict(fan)
+    aim_fan[3] = key_x
+    rig.update(1.0 / 60.0, aim_fan, {}, aim_fingers={3})
+    # Check target assignment snapped (no spring)
+    check(abs(rig._sx[3] - key_x) < 1e-6,
+          "aim_fingers: _sx not snapped to key_x (got %.3f, want %.3f)" %
+          (rig._sx[3], key_x))
+    # Converge over a few frames (simulate AIM_LEAD period)
+    for _ in range(5):
+        rig.update(1.0 / 60.0, aim_fan, {}, aim_fingers={3})
+    tip_aim = rig._geom[3]["pts"][-1]
+    aim_err = abs(float(tip_aim[0]) - key_x)
+    check(aim_err < 0.1,
+          "aim_fingers: finger at %.3f cm, expected %.3f cm (err %.3f)" %
+          (tip_aim[0], key_x, aim_err))
+
+    # 3. Held finger: press=1.0, in held set, stays exact on key even if fan jumps
+    rig.settle(dict(fan), {})
+    rig.update(1.0 / 60.0, far, {3: 1.0}, held={3})
+    tip3 = rig._geom[3]["pts"][-1]
+    check(abs(float(tip3[0]) - float(fan[3])) <= 0.05,
+          "held finger drifted %.3f off its key" % abs(tip3[0] - fan[3]))
+
+    # 4. Pressed finger (press>0.5, not in held) also tracks key exactly
+    rig.settle(dict(fan), {})
+    near = dict(fan)
+    near[2] = float(fan[2] + 1.5)
+    rig.settle(near, {2: 1.0})
+    tip2 = rig._geom[2]["pts"][-1]
+    check(abs(float(tip2[0]) - near[2]) <= 0.10,
+          "pressed finger never converges (dx=%.2f)" % abs(tip2[0] - near[2]))
+    check(rig.tip_err[2] < 0.05, "pressed tip_err %.3f" % rig.tip_err[2])
+
+    # 5. Hold p95 sanity: 100 frames alternating press/release
+    rig.settle(dict(fan), {})
+    key_x = float(fan[3] + 2.0)
+    held_fan = dict(fan)
+    held_fan[3] = key_x
+    max_held_err = 0.0
+    for i in range(100):
+        is_held = (i % 20) < 10
+        press_amt = 1.0 if is_held else 0.0
+        rig.update(1.0 / 60.0, held_fan, {3: press_amt},
+                   held={3} if is_held else set(), aim_fingers=set())
+        tip_x = float(rig._geom[3]["pts"][-1][0])
+        if is_held:
+            max_held_err = max(max_held_err, abs(tip_x - key_x))
+    check(max_held_err < 0.1,
+          "hold max err %.3f cm over 100 frames (expected <0.1)" % max_held_err)
+
+    print("   smoothing ok: idle dx=%.2f, aim err=%.3f, hold max err=%.3f"
+          % (dx, aim_err, max_held_err))
 
 
 def main():

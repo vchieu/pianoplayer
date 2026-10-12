@@ -4,9 +4,13 @@
 # Author:       Marco Musy
 #-------------------------------------------------------------------------------
 import copy
+import itertools
+import warnings
 
+import numpy as np
 from music21.articulations import Fingering
 import pianoplayer.utils as utils
+import pianoplayer.handspec as _HS
 
 
 # Phase B (Viterbi fingering) constants. All at the top so they are easy to tune.
@@ -118,6 +122,145 @@ class Hand:
 
 
     #####################################################
+    def _span_cost(self, fa, fb, span_cm):
+        """F4a: quadratic cost up to COMFORT_SPAN, then steeper up to MAX_SPAN,
+        HARD beyond.  span_cm is at current hand size (already scaled by hf)."""
+        if fa == fb:
+            return HARD
+        # Order fingers so fa < fb for lookup (MAX_SPAN is symmetric)
+        a, b = (fa, fb) if fa < fb else (fb, fa)
+        max_span = _HS.MAX_SPAN[a][b] * self.hf
+        comfort = _HS.COMFORT_SPAN[a][b] * self.hf
+        if span_cm <= comfort:
+            return 0.0
+        if span_cm >= max_span:
+            return HARD
+        # Quadratic ramp from comfort to max_span
+        t = (span_cm - comfort) / (max_span - comfort)
+        return HARD * 0.5 * t * t  # up to 0.5*HARD at max_span
+
+    def _static_chord_cost(self, fingers, notes):
+        """Static cost for a chord fingering (no velocity, just spans + preferences)."""
+        cost = 0.0
+        for i, (fa, na) in enumerate(zip(fingers, notes)):
+            for j, (fb, nb) in enumerate(zip(fingers, notes)):
+                if i >= j:
+                    continue
+                span_cm = abs(nb.x - na.x) * self.hf
+                cost += self._span_cost(fa, fb, span_cm)
+            # F6: static black/white preference
+            if na.isBlack:
+                cost += _HS.BLACK_COST.get(fa, 0.0)
+            else:
+                cost += _HS.WHITE_COST.get(fa, 0.0)
+        return cost
+
+    def _chord_finger_candidates(self, chord_notes):
+        """F4b: Generate monotonic finger sets for a chord (≤5 notes).
+        Returns top-K=6 candidates by static cost, or all if fewer."""
+        k = len(chord_notes)
+        if k > 5:
+            warnings.warn(f"Chord with {k} notes > 5: splitting", stacklevel=2)
+            return None  # Signal to split
+        fingers = (1, 2, 3, 4, 5)
+        # Generate all monotonic combinations C(5, k)
+        candidates = []
+        for combo in itertools.combinations(fingers, k):
+            # Monotonic order: right hand ascending (low pitch -> low finger),
+            # left hand descending (low pitch -> high finger)
+            if self.LR == "right":
+                fings = list(combo)
+            else:
+                fings = list(reversed(combo))
+            # Filter by total span (sum of adjacent spans)
+            total_span = 0
+            ok = True
+            for i in range(k - 1):
+                span_cm = abs(chord_notes[i+1].x - chord_notes[i].x) * self.hf
+                sc = self._span_cost(fings[i], fings[i+1], span_cm)
+                if sc >= HARD:
+                    ok = False
+                    break
+                total_span += span_cm
+            if not ok:
+                continue
+            static_cost = self._static_chord_cost(fings, chord_notes)
+            candidates.append((static_cost, fings))
+        # Sort by static cost, keep top 6
+        candidates.sort(key=lambda x: x[0])
+        return [f for _, f in candidates[:6]]
+
+    def _group_chords(self, notes):
+        """Group consecutive notes with same chordID into chord groups.
+        Returns list of (start_idx, end_idx, chord_notes) for each chord."""
+        groups = []
+        i = 0
+        n = len(notes)
+        while i < n:
+            if notes[i].isChord:
+                cid = notes[i].chordID
+                start = i
+                chord_notes = []
+                while i < n and notes[i].isChord and notes[i].chordID == cid:
+                    chord_notes.append(notes[i])
+                    i += 1
+                groups.append((start, i, chord_notes))
+            else:
+                i += 1
+        return groups
+
+    def _precompute_chord_candidates(self, notes):
+        """Precompute finger candidates for each chord group."""
+        chord_groups = self._group_chords(notes)
+        self._chord_candidates = {}  # start_idx -> list of finger lists
+        self._chord_spans = {}       # start_idx -> (start, end)
+        for start, end, chord_notes in chord_groups:
+            cands = self._chord_finger_candidates(chord_notes)
+            if cands is None:
+                # >5 notes: split into overlapping sub-chords (simplified: warn and use first 5)
+                # For now, just use first 5 notes
+                cands = self._chord_finger_candidates(chord_notes[:5])
+            self._chord_candidates[start] = cands
+            self._chord_spans[start] = (start, end)
+
+    def _crossing_cost(self, fa, fb, xba, dt_gap, na, nb):
+        """F5: crossing cost replacing unconditional HARD.
+        fa->fb is a crossing when (fb-fa)*xba < 0 (fingers cross over x).
+        For left hand, x is mirrored (negated), so we use -xba for crossing check.
+        Returns added cost (0 if not a crossing)."""
+        if fa == fb:
+            return 0.0
+        # For left hand, x is mirrored (higher pitch = more negative x)
+        # So crossing condition is inverted: use -xba for left hand
+        eff_xba = -xba if self.LR == "left" else xba
+        if (fb - fa) * eff_xba >= 0:
+            return 0.0  # not a crossing
+        
+        # Thumb-under: fb == 1 (thumb passes under fa)
+        if fb == 1 and fa > 1:
+            base = _HS.UNDER.get(fa, 1.0)
+            # Thumb-under on white keys is standard technique - very low cost
+            if not nb.isBlack:
+                base *= 0.1  # nearly free on white keys
+        # Thumb-over: fa == 1 (fa is thumb, fb passes over) - rare
+        elif fa == 1 and fb > 1:
+            base = _HS.UNDER.get(fb, 2.0)
+            if not na.isBlack:
+                base *= 0.2
+        else:
+            # Non-thumb crossing: higher finger over lower
+            a, b = (fa, fb) if fa < fb else (fb, fa)
+            base = _HS.CROSS_BASE.get((a, b), 1.5)
+        # Scale by interval (semitones) and inverse time
+        semitones = 0
+        if hasattr(na, 'midi') and hasattr(nb, 'midi'):
+            semitones = abs(int(nb.midi) - int(na.midi))
+        else:
+            semitones = int(round(abs(xba) / 1.0))  # approx 1 cm per semitone
+        interval_mult = max(1.0, semitones / 3.0)
+        time_mult = max(1.0, 0.2 / max(dt_gap, 1e-3))
+        return base * interval_mult * time_mult
+
     def _skip_penalty(self, fa, fb, na, nb):
         """Hard-soft version of the old optimize_seq.skip() rules.
 
@@ -131,50 +274,45 @@ class Hand:
         different pitch" rule plus the single-note crossing rules on x.
         """
         xba = nb.x - na.x  # physical distance btw the second to first note, in cm
+        dt_gap = _dt_sec(na, nb)
 
-        if na.isChord and nb.isChord and na.chordID == nb.chordID:
-            # na and nb are notes in the same chord
-            if fa==fb: return HARD   # play different chord notes w/ same finger
-            if fa<fb and self.LR=='left' : return HARD
-            if fa>fb and self.LR=='right': return HARD
-            axba = abs(xba)*self.hf /0.8
-            # max normalized distance in cm btw 2 consecutive fingers
-            if axba> 5 and (fa==3 and fb==4 or fa==4 and fb==3): return HARD
-            if axba> 5 and (fa==4 and fb==5 or fa==5 and fb==4): return HARD
-            if axba> 6 and (fa==2 and fb==3 or fa==3 and fb==2): return HARD
-            if axba> 7 and (fa==2 and fb==4 or fa==4 and fb==2): return HARD
-            if axba> 8 and (fa==3 and fb==5 or fa==5 and fb==3): return HARD
-            if axba>11 and (fa==2 and fb==5 or fa==5 and fb==2): return HARD
-            if axba>12 and (fa==1 and fb==2 or fa==2 and fb==1): return HARD
-            if axba>14 and (fa==1 and fb==3 or fa==3 and fb==1): return HARD
-            if axba>16 and (fa==1 and fb==4 or fa==4 and fb==1): return HARD
-            return 0.0
-
-        # single notes, and every mixed pair: the old single-note rules.
-        # F3: same finger on different keys is no longer banned outright:
-        # only a still-held note (B2) or a too-fast reuse (dt in seconds)
-        # is HARD; otherwise a soft cost growing with the leap distance.
-        # The boundary is inclusive (dt <= 0.25 s is HARD): eighth notes at
-        # 120 bpm sit exactly at 0.25 s, and letting one finger slide
-        # across scale steps there collapses every black-key scale into
-        # 1,1,1.../3,3,3... reuse (the thumb-tuck velocity is overpriced
-        # until F5 models crossing properly). Revisit in F5.
-        if fa==fb and abs(xba)>1e-9:
+        # Same finger, different key: F3 soft cost (or HARD if held/fast)
+        if fa == fb and abs(xba) > 1e-9:
             if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
                 return HARD  # finger still holding na: cannot replay (B2)
             # F3 boundary is inclusive (eighth notes at 120 bpm sit exactly
             # at 0.25 s); the +1e-6 epsilon keeps the boundary stable against
             # float rounding in beat_to_seconds (a computed 0.2500000001 s
             # must stay HARD, a computed 0.2499999999 s likewise).
-            if _dt_sec(na, nb) <= SAME_FINGER_MAX_DT + 1e-6:
+            if dt_gap <= SAME_FINGER_MAX_DT + 1e-6:
                 return HARD  # too fast to lift and re-place the finger
             return SAME_FINGER_BASE + SAME_FINGER_DX * abs(xba)
-        if fa>1 : # if a is not thumb
-            if fb>1 and (fb-fa)*xba<0: return HARD # non-thumb fingers are crossings
-            if fb==1 and nb.isBlack and xba>0: return HARD # crossing thumb goes to black
-        else: # a is played by thumb:
-            # a is black  and  b is behind a  and  fb not thumb  and na.duration<2:
-            if na.isBlack and xba<0 and fb>1 and na.duration<2: return HARD
+
+        if na.isChord and nb.isChord and na.chordID == nb.chordID:
+            # na and nb are notes in the same chord: check finger order + span
+            if self.LR == 'left' and fa < fb:
+                return HARD
+            if self.LR == 'right' and fa > fb:
+                return HARD
+            # F4a: span cost replaces the old axba threshold chain
+            span_cm = abs(xba) * self.hf
+            return self._span_cost(fa, fb, span_cm)
+
+        # Single notes and mixed pairs: crossing rules on x (F5)
+        cross = self._crossing_cost(fa, fb, xba, dt_gap, na, nb)
+        if cross >= HARD:
+            return HARD
+        if cross > 0:
+            return cross
+
+        # Thumb-on-black crossing rule (legacy, keep as soft)
+        # For left hand, xba sign is inverted
+        eff_xba = -xba if self.LR == "left" else xba
+        if fa > 1 and fb == 1 and nb.isBlack and eff_xba > 0:
+            return 0.5  # soft penalty instead of HARD
+        if fa == 1 and fb > 1 and na.isBlack and eff_xba < 0 and na.duration < 2:
+            return 0.5
+
         return 0.0
 
 
@@ -187,18 +325,38 @@ class Hand:
         the 0.1 smoothing term, weights/bfactor the old finger strength and
         black-key penalties. On top come the hard-soft skip rules (B1), the
         held-finger constraint (B2) and the weak-finger penalty (B3).
+        F6: static cost per (finger, black/white) added, not multiplied by velocity.
+        
+        Special handling for thumb-under on white keys (scale pattern):
+        the hand translates, so the thumb doesn't travel the full rest-position distance.
         """
         if fa not in (1,2,3,4,5) or fb not in (1,2,3,4,5):
             return HARD  # e.g. a legacy finger 0: always losable, never fatal
         same_key = abs(nb.x - na.x) < 1e-9
+        xba = nb.x - na.x  # physical distance btw the second to first note, in cm
+        
+        # F5/F6: Special case - thumb-under on white keys (scale pattern)
+        # The hand translates forward, so reach_err is just the key distance
+        # For right hand: thumb-under is fa in {3,4}, fb=1, ascending white-to-white
+        # For left hand (mirrored): thumb-under is fa=2 (index), fb=1, ascending white-to-white
+        # Also: left hand after thumb (1) goes to middle (3) for the next white step
+        eff_xba = -xba if self.LR == "left" else xba
+        ascending_white = (eff_xba > 0 and not na.isBlack and not nb.isBlack)
+        is_thumb_under_right = (self.LR == "right" and fa in (3, 4) and fb == 1 and ascending_white)
+        is_thumb_under_left = (self.LR == "left" and fa == 2 and fb == 1 and ascending_white)
+        # Left hand: after thumb (1), middle (3) takes the next white key step (hand shift)
+        is_left_thumb_to_middle = (self.LR == "left" and fa == 1 and fb == 3 and ascending_white)
+        is_step = (is_thumb_under_right or is_thumb_under_left or is_left_thumb_to_middle) and abs(nb.x - na.x) < 3.0
+        
         if same_key:
-            # F2: alternating fingers on a repeated key costs no travel:
-            # the hand barely moves, so every finger starts from reach 0
-            # and only the same-finger repetition penalty below tells
-            # a fast repeat (3-2-1) apart from a comfortable one.
             reach_err = 0.0
+        elif is_step:
+            # Thumb-under on white keys: hand shifts so thumb is already in position
+            # Use near-zero reach_err to strongly prefer this pattern over adjacent fingers
+            reach_err = 0.02  # cm - hand translation handles it
         else:
             reach_err = abs(nb.x - (na.x + self.frest[fb] - self.frest[fa]))
+            
         dt_gap = _dt_sec(na, nb)
         dt = dt_gap + SEC_SMOOTH  # available time (s) + smoothing term
         v  = reach_err/dt                # velocity
@@ -207,6 +365,11 @@ class Hand:
         else:
             v /= self.weights[fb]
         cost = v + self._skip_penalty(fa, fb, na, nb)
+        # F6: static black/white preference per finger (not multiplied by velocity)
+        if nb.isBlack:
+            cost += _HS.BLACK_COST.get(fb, 0.0)
+        else:
+            cost += _HS.WHITE_COST.get(fb, 0.0)
         # B2: a finger still holding na when nb starts must not replay a
         # different key at the same time.
         if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
@@ -250,39 +413,104 @@ class Hand:
         cost, a finger held by note i-2 can also be honoured when note i
         starts (B2). Back-pointers recover the cheapest path; ties keep
         the first minimum, so repeated runs agree exactly.
+        
+        F4b: For chord notes, restrict transitions to precomputed candidates
+        as WHOLE fingerings per chord group (not per-position).
+        F8: Vectorized pair_cost table per note pair.
         """
         n = len(notes)
         if n == 0:
             return []
         if n == 1:
             return [3]
-        fingers = (1,2,3,4,5)
+        
+        # F4b: Precompute chord candidates
+        self._precompute_chord_candidates(notes)
+        
+        # F8: Precompute pair_cost tables for all consecutive note pairs
+        # cost_table[i][fa][fb] = cost of (notes[i]=fa -> notes[i+1]=fb)
+        cost_tables = []
+        for i in range(n - 1):
+            na, nb = notes[i], notes[i + 1]
+            table = np.zeros((6, 6), dtype=np.float32)  # 1-indexed
+            for fa in range(1, 6):
+                for fb in range(1, 6):
+                    table[fa, fb] = self.pair_cost(na, fa, nb, fb)
+            cost_tables.append(table)
+        
+        fingers = (1, 2, 3, 4, 5)
         # dp[(fa, fb)]: cheapest cost of a path ending with fa on
         # notes[i-1] and fb on notes[i].
         dp = {}
+        # F0/F6: Start preference - right hand prefers thumb (1), left prefers pinky (5)
+        # Stronger preference to overcome the pairwise cost advantage of starting on 2/3
+        # Left hand needs even stronger preference for pinky to avoid thumb-start traps
+        start_pref = {1: -10.0, 5: -1.0} if self.LR == "right" else {5: -5.0, 1: -1.0}
         for fa in fingers:
             for fb in fingers:
-                dp[(fa,fb)] = self.pair_cost(notes[0], fa, notes[1], fb)
-        back = {1: {k: k[0] for k in dp}}  # unused in traceback, kept for shape
+                # Check if first note is part of a chord with restricted candidates
+                if 0 in self._chord_spans:
+                    start, end = self._chord_spans[0]
+                    if 0 < end and fa not in self._chord_candidates[0][0]:
+                        dp[(fa, fb)] = HARD
+                        continue
+                dp[(fa, fb)] = cost_tables[0][fa, fb] + start_pref.get(fa, 0.0)
+        
+        back = {1: {k: k[0] for k in dp}}
         for i in range(2, n):
             na, nb, nc = notes[i-1], notes[i], notes[i-2]
             nc_held = nc.time_real + nc.dur_real > nb.time_real + HELD_EPS
             ndp, nback = {}, {}
+            
+            # Check if current note is part of a chord
+            chord_start = None
+            for cs, (start, end) in self._chord_spans.items():
+                if start <= i < end:
+                    chord_start = cs
+                    break
+            
             for fa in fingers:
                 for fb in fingers:
-                    pc = self.pair_cost(na, fa, nb, fb)
+                    # F4b: Restrict fb to chord candidates if in chord
+                    if chord_start is not None:
+                        chord_cands = self._chord_candidates[chord_start]
+                        local_idx = i - chord_start
+                        # Whole-candidate constraint: we must be at the correct
+                        # position within ONE of the precomputed chord fingerings.
+                        # Check if there exists a candidate where position local_idx = fb.
+                        allowed_fbs = {c[local_idx] for c in chord_cands}
+                        if fb not in allowed_fbs:
+                            ndp[(fa, fb)] = HARD
+                            nback[(fa, fb)] = fa
+                            continue
+                        
+                        # Additional constraint: ensure the PREVIOUS note's finger
+                        # matches the SAME candidate at position local_idx-1.
+                        # This enforces whole-candidate consistency across the chord.
+                        if local_idx > 0:
+                            valid_fps = set()
+                            for c in chord_cands:
+                                if c[local_idx] == fb:
+                                    valid_fps.add(c[local_idx - 1])
+                            if fa not in valid_fps:
+                                ndp[(fa, fb)] = HARD
+                                nback[(fa, fb)] = fa
+                                continue
+                    
+                    pc = cost_tables[i-1][fa, fb]
                     best, bestfp = None, None
                     for fp in fingers:
-                        c = dp[(fp,fa)] + pc
-                        if nc_held and fp==fb and abs(nb.x - nc.x)>1e-9:
+                        c = dp[(fp, fa)] + pc
+                        if nc_held and fp == fb and abs(nb.x - nc.x) > 1e-9:
                             c += HARD
                         if best is None or c < best:
                             best, bestfp = c, fp
-                    ndp[(fa,fb)] = best
-                    nback[(fa,fb)] = bestfp
+                    ndp[(fa, fb)] = best
+                    nback[(fa, fb)] = bestfp
             dp, back[i] = ndp, nback
+        
         bfa, bfb = min(dp, key=lambda k: dp[k])
-        out = [0]*n
+        out = [0] * n
         out[n-1], out[n-2] = bfb, bfa
         for i in range(n-1, 1, -1):
             out[i-2] = back[i][(out[i-1], out[i])]
@@ -300,6 +528,8 @@ class Hand:
         free finger (measured with pair_cost against both neighbours).
         At most a handful of notes are ever held at once, so a free
         finger always exists in practice. Returns the corrected list.
+        
+        F7: Recompute total cost after repair; warn if increased; log if >1% notes repaired.
         """
         f = list(fingers)
         n = len(notes)
@@ -342,8 +572,21 @@ class Hand:
             elif self.verbose:
                 print('  held-finger repair: note %d (%s%s) keeps conflicting'
                       ' finger %d (no free finger)' % (i, bi.name, bi.octave, f[i]))
-        if fixed and self.verbose:
-            print('  held-finger repair: fixed %d note(s)' % fixed)
+        
+        # F7: Recompute total cost after repair
+        if fixed:
+            cost_before = self.total_cost(notes, fingers)
+            cost_after = self.total_cost(notes, f)
+            if cost_after > cost_before:
+                if self.verbose:
+                    print('  WARNING: held-finger repair increased total cost: %.2f -> %.2f'
+                          % (cost_before, cost_after))
+            if fixed > 0.01 * n:
+                if self.verbose:
+                    print('  held-finger repair: fixed %d / %d notes (%.1f%%)'
+                          % (fixed, n, 100.0 * fixed / n))
+            elif self.verbose:
+                print('  held-finger repair: fixed %d note(s)' % fixed)
         return f
 
 

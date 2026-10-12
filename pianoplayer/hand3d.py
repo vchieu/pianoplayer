@@ -560,6 +560,19 @@ class HandRig:
                        # self.COUPLING to solve_chain, rest_chains uses
                        # REST_DIP_RATIO; reach 70/70, worst bend 1.20->1.06)
     SMOOTH_TAU = 0.05    # R1.8: idle-finger x glide time constant [s]
+    
+    # R5.5: wrist pitch on black keys
+    PITCH_BLACK = math.radians(3.0)   # ±3° pitch when black key pressed
+    PITCH_VEL_GAIN = 0.002            # rad of pitch per cm/s hand speed
+    PITCH_VEL_MAX = math.radians(2.0) # max velocity-induced pitch
+    PITCH_TAU = 0.08                  # pitch smoothing time constant [s]
+    
+    # R5.6: tendon linking - adjacent finger lift when one presses
+    TENDON_LIFT_MAX = 0.20            # max lift for adjacent fingers [cm]
+    TENDON_LIFT_RING = 0.20           # ring finger lift (more)
+    TENDON_LIFT_OTHER = 0.10          # index/middle/pinky lift (less)
+    TENDON_PRESS_THRESH = 0.5         # press threshold to trigger
+    TENDON_TAU = 0.04                 # tendon lift smoothing [s]
 
     def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,
                  mesh="skinned", texture_path=None):
@@ -606,6 +619,11 @@ class HandRig:
         self._skin = None         # Tier-B skinned mesh state (or None)
         self._skin_q = {}         # finger -> current q (4,3) world (skinned)
         self._skin_ms = 0.0       # last _update_skin cost [ms] (profiling)
+        # R5.5: pitch state
+        self._pitch = self.PITCH
+        self._pitch_target = self.PITCH
+        # R5.6: tendon lift state per finger
+        self._tendon_lift = {f: 0.0 for f in FINGERS}
 
         self._build()
 
@@ -739,7 +757,6 @@ class HandRig:
             get_rest_data,
             rest_uv,
         )
-        from pianoplayer.handmesh import texture_path as _default_tex
         data = get_rest_data(self.hf, self.side)
         rest = np.array(data["pts"], float)
         nrm0 = np.array(data["nrm"], float)
@@ -760,7 +777,22 @@ class HandRig:
             mesh.dataset.GetPointData().SetTCoords(tc)
         except Exception:
             pass
-        tpath = self.texture_path or _default_tex(self.hf, self.side)
+        tpath = self.texture_path
+        if tpath is None:
+            # Try package data first
+            hf_s = f"{float(self.hf):.2f}"
+            hash8 = _HS.geom_hash()[:8]
+            pkg_tex = f"handtex_{self.side}_{hf_s}_{hash8}.png"
+            try:
+                from importlib.resources import files as _files
+                pkg_path = _files("pianoplayer.data").joinpath(pkg_tex)
+                if pkg_path.is_file():
+                    tpath = str(pkg_path)
+            except Exception:
+                pass
+        if tpath is None:
+            from pianoplayer.handmesh import texture_path as _default_tex
+            tpath = _default_tex(self.hf, self.side)
         _tex_ok = False
         try:
             import os as _os
@@ -797,14 +829,22 @@ class HandRig:
         w32 = np.ascontiguousarray(w, np.float32)
         # Precompute rigid vertex mask (weight 1.0 on rigid bone)
         rigid_mask = (w32[:, 0] >= 0.99) & np.isin(idx[:, 0], np.flatnonzero(rigid))
+        # R6: dense weight matrix (N, B) for matrix-blend skinning
+        N = rest32.shape[0]
+        W_dense = np.zeros((N, B), np.float32)
+        W_dense[np.arange(N)[:, None], idx] = w32
         self._skin = dict(mesh=mesh, mods=mods, pbuf=pbuf, nbuf=nbuf,
                           rest=rest32, nrm0=nrm32, idx=idx, w=w32,
+                          W_dense=W_dense,
                           P0=P032, R0=R032, P0g=P032[idx],
                           names=names, bones=bones, B=B, rigid=rigid, fb=fb,
                           fb_flat=fb_flat,
                           Rb=np.empty((B, 3, 3), np.float32),
                           Pb=np.empty((B, 3), np.float32),
                           rigid_mask=rigid_mask)
+        # R4: Store texture path for perspective view toggle
+        if _tex_ok:
+            self._skin["texture_path"] = tpath
         # R1.6 vertex-blush prep, from the bone weights: dominant finger +
         # distalness (weight on that finger's f?_2 bone).  The RGB scalars
         # start at the texture base (white: scalars multiply the texture)
@@ -842,6 +882,18 @@ class HandRig:
             self._skin["blush_arr"] = arr
             self._skin["blush_col"] = {}
             self._skin["blush_base"] = base255
+            # R4: Store resting vertex colors (with AO + shading) for press restoration
+            self._skin["blush_rest"] = self._skin["blush"].copy()
+            # R4: Apply baked AO to vertex colors (multiply into base)
+            if "ao" in data:
+                ao = np.array(data["ao"], float)
+                # AO is in [0.75, 1.0], multiply into base color
+                self._skin["blush"] = (self._skin["blush"].astype(float) * ao[:, None]).astype(np.uint8)
+                self._skin["blush_arr"].Modified()
+            # R4: Skin shading - pinker at joints/tips, lighter on dorsum, +-3% noise
+            self._apply_skin_shading(rest32, nrm32, names, idx, w32)
+            # Update blush_rest after shading
+            self._skin["blush_rest"] = self._skin["blush"].copy()
         except Exception:
             pass
         # seed the skin chains (world) from the rest pose so a partial fan
@@ -890,7 +942,7 @@ class HandRig:
             pass
 
     def _update_skin(self, R):
-        """Vectorised LBS of the skin mesh from the solved chains (F3)."""
+        """Vectorised LBS of the skin mesh from the solved chains (F3 + R6 dense matrix blend)."""
         import time as _tm
         t0 = _tm.perf_counter()
         S = self._skin
@@ -911,35 +963,36 @@ class HandRig:
         # Batched: Rb[b] = Rc @ R0.T, Pb[b] = q[i]
         Rb[fb_flat] = Rc @ np.transpose(R0_fingers, (0, 2, 1))
         Pb[fb_flat] = q_all[:, :-1].reshape(-1, 3)
-        idx, w = S["idx"], S["w"]
         rest = S["rest"]
         nrm0 = S["nrm0"]
-        P0g = S["P0g"]
         rigid_mask = S["rigid_mask"]
         non_rigid = ~rigid_mask
         # Rigid vertices: single transform (root + R @ v)
         if rigid_mask.any():
             S["pbuf"][rigid_mask] = self.root + (R @ rest[rigid_mask].T).T
             S["nbuf"][rigid_mask] = (R @ nrm0[rigid_mask].T).T
-        # Non-rigid vertices: full 4-bone blend using einsum
+        # Non-rigid vertices: dense matrix blend (R6)
         if non_rigid.any():
             nr = non_rigid
-            idx_nr = idx[nr]           # (M,4)
-            w_nr = w[nr]               # (M,4)
             rest_nr = rest[nr]         # (M,3)
             nrm0_nr = nrm0[nr]         # (M,3)
-            P0g_nr = P0g[nr]           # (M,4,3)
-            Rb_idx = Rb[idx_nr]        # (M,4,3,3)
-            Pb_idx = Pb[idx_nr]        # (M,4,3)
-            offset = rest_nr[:, None, :] - P0g_nr  # (M,4,3)
-            # Batched matrix-vector multiply via einsum
-            v = Pb_idx + np.einsum('mikj,mij->mik', Rb_idx, offset)
-            S["pbuf"][nr] = (v * w_nr[..., None]).sum(axis=1)
-            # Normals: rotate by bone rotations, blend via einsum, final normalize
-            n_rot = np.einsum('mikj,mj->mik', Rb_idx, nrm0_nr)  # (M,4,3)
-            nbuf = np.einsum('mi,mij->mj', w_nr, n_rot)
-            nbuf /= np.maximum(np.linalg.norm(nbuf, axis=1, keepdims=True), 1e-12)
-            S["nbuf"][nr] = nbuf
+            W_dense_nr = S["W_dense"][nr]  # (M,B)
+            # Flatten bone matrices: (B,9) and (B,3)
+            Rb_flat = Rb.reshape(S["B"], 9)
+            # R6: Pb' = Pb - Rb @ P0  (incorporates the -w*Rb@P0 term into translation)
+            Pb_prime = Pb - np.einsum('bij,bj->bi', Rb, S["P0"])
+            Pb_prime_flat = Pb_prime.reshape(S["B"], 3)
+            # Blended rotation matrices: (M,9) -> (M,3,3)
+            A_flat = W_dense_nr @ Rb_flat
+            A = A_flat.reshape(-1, 3, 3)
+            # Blended translations with P0 correction: (M,3)
+            t = W_dense_nr @ Pb_prime_flat
+            # Transform vertices and normals
+            v = np.einsum('nij,nj->ni', A, rest_nr) + t
+            S["pbuf"][nr] = v
+            n_rot = np.einsum('nij,nj->ni', A, nrm0_nr)
+            n_norm = np.linalg.norm(n_rot, axis=1, keepdims=True)
+            S["nbuf"][nr] = n_rot / np.maximum(n_norm, 1e-12)
         for m in S["mods"]:
             m.Modified()
         S["mesh"].actor.Modified()
@@ -1071,8 +1124,94 @@ class HandRig:
                 0.0, 255.0) + 0.5).astype(np.uint8)
             # released verts back to the base (white textured, SKIN plain)
             m0 = (S["dom"] == (f - 1)) & (w == 0.0)
-            rgb[m0] = np.asarray(S.get("blush_base", (255, 255, 255)),
-                                 np.uint8)
+            if "blush_rest" in S:
+                rgb[m0] = S["blush_rest"][m0]
+            else:
+                rgb[m0] = np.asarray(S.get("blush_base", (255, 255, 255)),
+                                     np.uint8)
+            S["blush_arr"].Modified()
+            S["mesh"].actor.Modified()
+        except Exception:
+            pass
+
+    # R4: Apply skin shading (pinker at joints/tips, lighter on dorsum, noise)
+    def _apply_skin_shading(self, rest, nrm, names, idx, w):
+        """Apply procedural skin shading to vertex colors (baked, no runtime cost).
+        
+        - Pinker at joint areas (MCP, PIP, DIP)
+        - Lighter on dorsum (back of hand, +z)
+        - ±3% noise for natural variation
+        """
+        try:
+            S = self._skin
+            if S is None or "blush" not in S:
+                return
+            N = rest.shape[0]
+            rgb = S["blush"].astype(float) / 255.0  # 0..1
+            
+            # Compute joint proximity for each vertex (using bone weights)
+            # Joint bones are f?_0 (MCP), f?_1 (PIP), f?_2 (DIP)
+            joint_bones = set()
+            for f in FINGERS:
+                for j in (0, 1, 2):
+                    try:
+                        joint_bones.add(names.index("f%d_%d" % (f, j)))
+                    except ValueError:
+                        pass
+            
+            # Weight on joint bones = proximity to joints
+            joint_weight = np.zeros(N, float)
+            for b in joint_bones:
+                m = idx == b
+                joint_weight += (w * m).sum(axis=1)
+            joint_weight = np.clip(joint_weight, 0.0, 1.0)
+            
+            # Dorsum factor: +z (back of hand) is lighter
+            # Normal z component indicates dorsal (z>0) vs palmar (z<0)
+            dorsum = np.clip(nrm[:, 2] * 0.5 + 0.5, 0.0, 1.0)  # 0=palmar, 1=dorsal
+            
+            # Fingertip factor: high distalness (weight on f?_2)
+            tip_weight = np.zeros(N, float)
+            for f in FINGERS:
+                try:
+                    b2 = names.index("f%d_2" % f)
+                    m = idx == b2
+                    tip_weight += (w * m).sum(axis=1)
+                except ValueError:
+                    pass
+            tip_weight = np.clip(tip_weight, 0.0, 1.0)
+            
+            # Skin shading multiplier
+            # - Joints: pinker (more red, less green/blue)
+            # - Dorsum: lighter (higher value)
+            # - Tips: slightly pinker
+            shade = np.ones((N, 3), float)
+            
+            # Joint pinkening: increase red, decrease green/blue slightly
+            shade[:, 0] += 0.08 * joint_weight  # more red
+            shade[:, 1] -= 0.04 * joint_weight  # less green
+            shade[:, 2] -= 0.04 * joint_weight  # less blue
+            
+            # Dorsum lightening
+            shade[:, 0] += 0.03 * dorsum
+            shade[:, 1] += 0.03 * dorsum
+            shade[:, 2] += 0.03 * dorsum
+            
+            # Tip pinkening
+            shade[:, 0] += 0.05 * tip_weight
+            shade[:, 1] -= 0.02 * tip_weight
+            shade[:, 2] -= 0.02 * tip_weight
+            
+            # ±3% noise
+            rng = np.random.default_rng(42)  # deterministic seed
+            noise = 1.0 + (rng.random(N) - 0.5) * 0.06
+            shade *= noise[:, None]
+            
+            # Apply shading (multiply)
+            rgb *= np.clip(shade, 0.85, 1.15)
+            
+            # Store back
+            S["blush"] = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
             S["blush_arr"].Modified()
             S["mesh"].actor.Modified()
         except Exception:
@@ -1088,10 +1227,13 @@ class HandRig:
         so their own opaque shadow would cap the fingertip black, and their
         transparent one veils the hand (see _SHADOW_* notes).  Silently
         skipped when raw vtk actors are unavailable.
+        
+        R4: Adds a second blurred layer (alpha 0.15) for softer shadows.
         """
         if vtkActor is None or vtkPolyDataMapper is None:
             return
         try:
+            # Primary shadow (opaque, sharp)
             mapper = vtkPolyDataMapper()
             mapper.SetInputData(pd)
             mapper.SetScalarVisibility(False)
@@ -1107,6 +1249,24 @@ class HandRig:
             self._arm_blob = (actor, mat)
             actor.SetUserMatrix(mat)
             self._blob_actors.append(actor)
+            
+            # R4: Secondary blurred shadow layer (alpha 0.15, slightly offset)
+            mapper2 = vtkPolyDataMapper()
+            mapper2.SetInputData(pd)
+            mapper2.SetScalarVisibility(False)
+            actor2 = vtkActor()
+            actor2.SetMapper(mapper2)
+            actor2.GetProperty().SetColor(*_SHADOW_COL)
+            actor2.GetProperty().SetOpacity(0.15)
+            try:
+                actor2.GetProperty().LightingOff()
+            except Exception:
+                pass
+            mat2 = vtkMatrix4x4()
+            mat2.Identity()
+            self._arm_blob2 = (actor2, mat2)
+            actor2.SetUserMatrix(mat2)
+            self._blob_actors.append(actor2)
         except Exception:
             pass
 
@@ -1133,6 +1293,39 @@ class HandRig:
             mat.SetElement(2, 3, _SHADOW_Z)
             mat.Modified()
             actor.Modified()
+            # R4: Update second blurred shadow layer (slightly offset for blur effect)
+            if self._arm_blob2:
+                actor2, mat2 = self._arm_blob2
+                # Slightly offset the projection for blur effect
+                if self._blob_world:
+                    mat2.SetElement(0, 0, 1.0)
+                    mat2.SetElement(0, 1, 0.0)
+                    mat2.SetElement(0, 2, 0.0)
+                    mat2.SetElement(0, 3, _SHADOW_OFF[0] + 0.15)
+                    mat2.SetElement(1, 0, 0.0)
+                    mat2.SetElement(1, 1, 1.0)
+                    mat2.SetElement(1, 2, 0.0)
+                    mat2.SetElement(1, 3, _SHADOW_OFF[1] + 0.15)
+                    mat2.SetElement(2, 0, 0.0)
+                    mat2.SetElement(2, 1, 0.0)
+                    mat2.SetElement(2, 2, 0.0)
+                    mat2.SetElement(2, 3, _SHADOW_Z + 0.05)
+                else:
+                    r0, r1 = R[0], R[1]
+                    mat2.SetElement(0, 0, r0[0])
+                    mat2.SetElement(0, 1, r0[1])
+                    mat2.SetElement(0, 2, r0[2])
+                    mat2.SetElement(0, 3, t[0] + _SHADOW_OFF[0] + 0.15)
+                    mat2.SetElement(1, 0, r1[0])
+                    mat2.SetElement(1, 1, r1[1])
+                    mat2.SetElement(1, 2, r1[2])
+                    mat2.SetElement(1, 3, t[1] + _SHADOW_OFF[1] + 0.15)
+                    mat2.SetElement(2, 0, 0.0)
+                    mat2.SetElement(2, 1, 0.0)
+                    mat2.SetElement(2, 2, 0.0)
+                    mat2.SetElement(2, 3, _SHADOW_Z + 0.05)
+                mat2.Modified()
+                actor2.Modified()
             return
         r0, r1 = R[0], R[1]
         mat.SetElement(0, 0, r0[0])
@@ -1158,6 +1351,26 @@ class HandRig:
                 a.SetVisibility(1 if v else 0)
             except Exception:
                 pass
+
+    def set_texture_enabled(self, enabled):
+        """Enable/disable texture (for perspective view fallback to vertex colors).
+        
+        R4: In perspective view (55°), the planar UV stretches badly.
+        Disable texture and use baked vertex colors (AO + skin shading) instead.
+        """
+        if self._skin is None or "mesh" not in self._skin:
+            return
+        mesh = self._skin["mesh"]
+        try:
+            if enabled:
+                mesh.texture(self._skin.get("texture_path", ""))
+                mesh.color((1.0, 1.0, 1.0))
+            else:
+                mesh.texture(None)
+                # Vertex colors are already set in _build_skin (blush includes AO + shading)
+                mesh.color(self.skin)
+        except Exception:
+            pass
 
     def update(self, dt, finger_x, press=None, advance_black=None,
                  aim_finger=None, held=None, aim_fingers=None):
@@ -1230,12 +1443,13 @@ class HandRig:
                 x = self._targets_x.get(f)
             if x is None:
                 continue
-            fan_xs[f] = float(x)
-            # R1.8: held/aiming fingers track the key x exactly (no glide,
-            # no idle lerp), so a press never teleports at the transition;
-            # idle fingers glide toward the fan (tau = SMOOTH_TAU).  The
-            # tracked x seeds the glide so a release resumes from the key.
-            if f in held or f in aim_set:
+            fan_xs[f] = float(x)        # pre-lerp target for root = fan target
+            # R1.8: held/aiming/pressed fingers track the key x exactly
+            # (no glide, no idle lerp), so a press never teleports at the
+            # transition.  Idle fingers critically-damped spring toward fan
+            # target (tau = SMOOTH_TAU), then lerp toward natural.
+            press_amt = float(press.get(f, 0.0))
+            if f in held or f in aim_set or press_amt > 0.5:
                 x = float(x)
                 self._sx[f] = x
             else:
@@ -1243,7 +1457,7 @@ class HandRig:
                 k = 1.0 - math.exp(-dt / self.SMOOTH_TAU)
                 x = prev + (float(x) - prev) * k
                 self._sx[f] = x
-            a = float(min(max(press.get(f, 0.0), 0.0), 1.0))
+            a = float(min(max(press_amt, 0.0), 1.0))
             rest = 1.0 - a
             if f not in held and f not in aim_set and rest > 0.5:
                 # H1.2/1.3: idle fingers head for their natural slots and
@@ -1286,12 +1500,49 @@ class HandRig:
             targets[f] = (float(x), yy, z, a)
             black_pressed = black_pressed or (black and a > 0.004)
         self._targets_x = {f: t[0] for f, t in targets.items()}
-
+        
+        # Compute any_black early for R5.5 pitch
+        any_black = black_pressed if advance_black is None else (
+            black_pressed or bool(advance_black))
+        
+        # ---- R5.5: wrist pitch on black keys & from velocity ----
+        # Base pitch: PITCH (default -5°), add PITCH_BLACK (+3°) when any black key pressed
+        pitch_base = self.PITCH
+        if any_black:
+            pitch_base += self.PITCH_BLACK
+        # Add velocity-induced pitch (smoothed)
+        pitch_vel = max(-self.PITCH_VEL_MAX, min(self.PITCH_VEL_MAX, self.PITCH_VEL_GAIN * self._vx))
+        self._pitch_target = pitch_base + pitch_vel
+        # Smooth pitch
+        k_pitch = 1.0 - math.exp(-dt / self.PITCH_TAU)
+        self._pitch += (self._pitch_target - self._pitch) * k_pitch
+        
+        # ---- R5.6: tendon linking - adjacent finger lift when one presses ----
+        # For each finger pressing > threshold, lift adjacent fingers slightly
+        # Ring finger lifts more (0.2 cm) than others (0.1 cm)
+        # Held fingers (press > 0.5 and in held) are unaffected
+        new_tendon_lift = {f: 0.0 for f in FINGERS}
+        for f in FINGERS:
+            press_amt = float(press.get(f, 0.0))
+            if press_amt > self.TENDON_PRESS_THRESH and f not in held:
+                # This finger is pressing but not held (active press)
+                # Lift adjacent fingers
+                for adj in (f-1, f+1):
+                    if 1 <= adj <= 5 and adj not in held:
+                        press_adj = float(press.get(adj, 0.0))
+                        if press_adj <= self.TENDON_PRESS_THRESH:
+                            # Adjacent finger is not pressing much - lift it
+                            lift_amt = (self.TENDON_LIFT_RING if adj == 4 
+                                        else self.TENDON_LIFT_OTHER)
+                            new_tendon_lift[adj] = max(new_tendon_lift[adj], lift_amt)
+        # Smooth tendon lifts
+        for f in FINGERS:
+            k_tendon = 1.0 - math.exp(-dt / self.TENDON_TAU)
+            self._tendon_lift[f] += (new_tendon_lift[f] - self._tendon_lift[f]) * k_tendon
+        
         # ---- root: spring toward the mean of the (pre-lerp) targets --
         xs = [fan_xs[f] for f in targets] if fan_xs else []
         rx_t = float(np.mean(xs)) if xs else float(self.root[0])
-        any_black = black_pressed if advance_black is None else (
-            black_pressed or bool(advance_black))
         ry_t = self.ROOT_Y + (self.BLACK_SHIFT if any_black else 0.0)
 
         # C4: a finger holding a key (press > 0.5) whose tip is still off
@@ -1343,7 +1594,7 @@ class HandRig:
         self.yaw += (yaw_t - self.yaw) * (1.0 - math.exp(-dt / 0.12))
 
         # ---- hand orientation -----------------------------------------
-        R = _rot_z(self.yaw) @ _rot_y(-self.s * self.ROLL) @ _rot_x(self.PITCH)
+        R = _rot_z(self.yaw) @ _rot_y(-self.s * self.ROLL) @ _rot_x(self._pitch)
         self._set(self.arm, R, self.root)
         self._set(self.web, R, self.root + R @ self._web_local)
         self._set_arm_shadow(R, self.root)
@@ -1356,6 +1607,10 @@ class HandRig:
             if t is None:
                 continue
             x, y, z, a = t
+            # R5.6: apply tendon lift to idle/raised fingers (visual only)
+            tendon_lift = self._tendon_lift.get(f, 0.0)
+            if tendon_lift > 0.0:
+                z += tendon_lift
             g = self._geom[f]
             base = self.root + R @ g["base_local"]
             pole = R @ g["pole_local"]
