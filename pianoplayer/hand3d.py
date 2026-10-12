@@ -555,8 +555,10 @@ class HandRig:
     PITCH = math.radians(-5.0)
     ROLL = math.radians(5.0)  # sign follows the hand side
     BEND_MAX = 1.75
-    COUPLING = 0.65   # R5.4: DIP = 0.65 x PIP like a real finger (0.4 -> 0.65;
-                      # reach remeasured: 70/70 green, worst bend 1.20 -> 1.06)
+    COUPLING = _HS.REST_DIP_RATIO  # single source: DIP = 0.65 x PIP like
+                       # a real finger (R5.4; wired: update() passes
+                       # self.COUPLING to solve_chain, rest_chains uses
+                       # REST_DIP_RATIO; reach 70/70, worst bend 1.20->1.06)
     SMOOTH_TAU = 0.05    # R1.8: idle-finger x glide time constant [s]
 
     def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,

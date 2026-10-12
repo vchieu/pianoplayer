@@ -77,16 +77,6 @@ def cache_path(hf, side):
                                                     H.geom_hash()))
 
 
-def _legacy_cache_path(hf, side):
-    """Pre-R1.4 filename.  Never loaded (no geometry hash inside, so loading
-    it would reintroduce BUG-4: stale shapes surviving constant edits);
-    only listed so clear_cache() can migrate it away."""
-    s = "left" if str(side).lower().startswith("l") else "right"
-    return os.path.join(cache_dir(),
-                        "handmesh_%s_%.2f_%s.npz" % (s, float(hf),
-                                                    HANDMESH_VERSION))
-
-
 def _load_cache(path):
     try:
         if os.path.isfile(path):
@@ -106,14 +96,34 @@ def texture_path(hf=None, side=None):
                                                    H.geom_hash()))
 
 
-def clear_cache():
-    """Remove all cached meshes + textures (R1.4 `--clear-cache`)."""
+def _cache_hash_of(fn):
+    """Hash embedded in a cache filename, or None for legacy names.
+
+    Current names end in _<hash8> (see cache_path/texture_path); anything
+    else (pre-R1.4 version-suffixed meshes, the bare handtex_v2.png) is
+    legacy and therefore stale by definition (BUG-4)."""
+    tail = fn.rsplit(".", 1)[0].rsplit("_", 1)[-1]
+    if len(tail) == 8 and all(c in "0123456789abcdef" for c in tail):
+        return tail
+    return None
+
+
+def clear_cache(prune_only=False):
+    """Remove cached meshes + textures (R1.4 `--clear-cache`).
+
+    Default clears all (unchanged); prune_only=True (`--prune-cache`)
+    deletes only stale files -- hashed names whose hash != current
+    geom_hash() plus legacy unhashed names -- and keeps current caches.
+    """
     n = 0
     try:
         d = cache_dir()
+        cur = H.geom_hash()
         for fn in os.listdir(d):
             if (fn.startswith("handmesh_") and fn.endswith(".npz")) or \
                     (fn.startswith("handtex_") and fn.endswith(".png")):
+                if prune_only and _cache_hash_of(fn) == cur:
+                    continue  # current geometry: keep
                 try:
                     os.remove(os.path.join(d, fn))
                     n += 1
@@ -638,6 +648,8 @@ def build_rest_mesh(hf, side="right"):
                         np.array(z["rest_nrm"], float))
         except Exception:
             pass
+    print("building hand mesh (first run, size %.2f %s)..." % (float(hf), s),
+          flush=True)
     vol, grid = _build_sdf(float(hf))
     pts, tris, nrm = _extract_mesh(vol, grid)
     faces = [tuple(int(v) for v in row) for row in tris]
@@ -919,8 +931,12 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     import sys as _sys
-    if "--clear-cache" in _sys.argv[1:]:
+    if "--prune-cache" in _sys.argv[1:]:
+        print("pruned %d stale file(s) in %s"
+              % (clear_cache(prune_only=True), cache_dir()))
+    elif "--clear-cache" in _sys.argv[1:]:
         print("cleared %d file(s) in %s" % (clear_cache(), cache_dir()))
     else:
-        print("usage: python -m pianoplayer.handmesh --clear-cache")
+        print("usage: python -m pianoplayer.handmesh --clear-cache "
+              "[--prune-cache]")
         _sys.exit(2)

@@ -1,10 +1,13 @@
 """
-Review-fix acceptance tests (2026-10-13 batch).
+Review-fix acceptance tests (2026-10-12 batch).
 
     python test_review_fixes.py
 
 Covers, without touching existing suites:
 
+    thumb lock         rig._geom[1]["base_local"] equals rest_chains(hf)[1][0]
+                       (frame round-tripped, x-mirrored for left) at 1e-6
+                       for all 7 sizes x both sides.
     cache persistence  delete the hashed cache, call get_rest_data twice:
                        1st builds, 2nd loads the full 5-array set (no
                        recompute) and matches the 1st call exactly.
@@ -62,6 +65,52 @@ def test_cache_persistence():
           % (len(d1["pts"]), len(d1["faces"])))
 
 
+def test_thumb_lock():
+    """Thumb MCP base matches rest_chains for all 7 sizes x both sides.
+
+    The rig's thumb MCP (D1b forward shift) and the SDF rest pose must use
+    the same base: compare in the same frame -- build the rig, run the
+    reset() path used by the reach tests, undo the root + R@ transform,
+    and check against rest_chains(hf)[1][0] (x-mirrored for left).
+    Tolerance 1e-6.
+    """
+    import numpy as np
+
+    from pianoplayer import handspec as HS
+    from pianoplayer.hand3d import HandRig, _rot_x, _rot_y, _rot_z
+    from pianoplayer.handmesh import rest_chains
+    from pianoplayer.utils import handSizeFactor
+
+    worst = 0.0
+    for size in ("XXS", "XS", "S", "M", "L", "XL", "XXL"):
+        hf = float(handSizeFactor(size))
+        chains, _cmc = rest_chains(hf)
+        want_r = np.asarray(chains[1][0], float)
+        for side in ("right", "left"):
+            rig = HandRig(side, size, mesh="tubes")
+            rig.reset()  # settle path used by the reach tests
+            base_local = np.asarray(rig._geom[1]["base_local"], float)
+            # same frame: world MCP as update() builds it, then undo
+            # the root + R@ transform back to the local frame.
+            R = (_rot_z(rig.yaw) @ _rot_y(-rig.s * rig.ROLL)
+                 @ _rot_x(rig.PITCH))
+            world = np.asarray(rig.root, float) + R @ base_local
+            local = R.T @ (world - np.asarray(rig.root, float))
+            check(np.allclose(local, base_local, atol=1e-9),
+                  "%s %s: frame round-trip broke (%.3g)" %
+                  (size, side, abs(local - base_local).max()))
+            want = want_r * (np.array([-1.0, 1.0, 1.0])
+                             if side == "left" else 1.0)
+            err = float(abs(local - want).max())
+            worst = max(worst, err)
+            check(err < 1e-6,
+                  "%s %s: thumb MCP base mismatch: rig %s vs rest %s "
+                  "(err %.3g)" % (size, side, tuple(base_local),
+                                  tuple(np.asarray(want, float)), err))
+    print("   thumb lock: 7 sizes x 2 sides match rest_chains "
+          "(worst err %.2g)" % worst)
+
+
 def test_tsec_none():
     from pianoplayer.hand import FALLBACK_BPM, _dt_sec
     from pianoplayer.scorereader import INote
@@ -95,7 +144,7 @@ def test_texture_fallback():
           "bogus texture: actor colour %s != SKIN %s" % (col, SKIN))
     import numpy as _np
     sc = _np.asarray(rig._skin["blush"][0], float) / 255.0
-    check(all(abs(c - s) < 2e-3 for c, s in zip(sc, SKIN)),
+    check(all(abs(c - s) < 1 / 255 + 1e-9 for c, s in zip(sc, SKIN)),
           "bogus texture: vertex base %s != SKIN %s" % (tuple(sc), SKIN))
     print("   texture: bogus path keeps SKIN %s" % (col,))
     rig_ok = HandRig(side="right", size="M", mesh="skinned")

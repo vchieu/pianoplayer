@@ -23,6 +23,9 @@ python test_sound.py          # legacy simpleaudio chord playback
 python test_regression.py     # finger/key/audio/fingering consistency, offscreen, no audio device
 python test_fingering.py      # fingering validity (fingers 1..5, held-finger, chord order) + 500-note solve time
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
+python test_hand_anatomy.py   # anatomical proportions on the mesh (6 checks)
+python test_review_fixes.py   # review-fix acceptance: cache persistence, t_sec, texture fallback, thumb lock
+python eval_fingering.py      # fingering quality gates (gold + PIG + F1-F3 + aim; C arpeggio R is XFAIL)
 python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend, offscreen
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
 ```
@@ -38,6 +41,7 @@ build manifest.
 | `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
 | `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`) |
+| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`); `hand3d` and `handmesh` both import from here |
 | `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
@@ -245,7 +249,8 @@ Grid step 0.15 cm over adaptive bounds; `vtkFlyingEdges3D` iso=0 →
 `~/.cache/pianoplayer/handmesh_{side}_{hf:.2f}_{geomhash}.npz`
 (`get_rest_data` stores the full set there: rest_pts, faces, rest_nrm plus
 `idx`/`w` weights; `build_rest_mesh` alone stores the first three).
-First build <5 s, cached load <0.2 s. Left hand mirrors x +
+First build ~4.7-7.2 s at size M (~8-13 s at L/XL/XXL on this
+machine), cached load ~40 ms for the full mesh + weight set. Left hand mirrors x +
 reverses face winding (same as `_arm_surface`). `geom_hash()` covers
 constants only -- geometry logic changes need a manual `HANDMESH_VERSION`
 bump (v4: thumb MCP base matches the rig, rest coupling 0.65).

@@ -5,7 +5,7 @@ has to keep up.  This is what happens when you run `pianoplayer ... -v`.
 
 Silent (volume = 0).
 
-    python diag_load.py [score.xml] [seconds]
+    python diag_load.py [score.xml] [seconds] [--mesh tubes|skinned]
 """
 import os
 import sys
@@ -19,6 +19,7 @@ sys.path.insert(0, HERE)
 
 from pianoplayer.audio import SynthCore, _CushionBackend
 from pianoplayer.vkeyboard import FPS_MS, LEAD_IN
+from pianoplayer import hand3d as h3d
 
 S = {"cb": 0, "frames": 0, "render": 0.0, "max_render": 0.0, "cpu": 0.0,
      "late": 0, "late_ms": [], "sizes": {},
@@ -78,7 +79,18 @@ def timed_take(self, frames):
 _CushionBackend._take = timed_take
 
 
-def main(fn="scores/bach_invention4.xml", seconds=8.0):
+def main(fn="scores/bach_invention4.xml", seconds=8.0, mesh="skinned"):
+    # Minimal mode flag: force both rigs into the requested mesh mode.
+    if str(mesh).lower() != "skinned":
+        _orig_init = h3d.HandRig.__init__
+
+        def _patched(self, side="right", size="M", *a, **k):
+            k.setdefault("mesh", mesh)
+            _orig_init(self, side, size, *a, **k)
+
+        h3d.HandRig.__init__ = _patched
+    print("mesh mode: %s" % ("tubes" if str(mesh).lower() != "skinned"
+                             else "skinned"))
     from music21 import converter
     from pianoplayer.hand import Hand
     from pianoplayer.scorereader import reader
@@ -192,6 +204,12 @@ def main(fn="scores/bach_invention4.xml", seconds=8.0):
 
 
 if __name__ == "__main__":
-    score = sys.argv[1] if len(sys.argv) > 1 else "scores/bach_invention4.xml"
-    secs = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
-    main(score, secs)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("score", nargs="?", default="scores/bach_invention4.xml")
+    ap.add_argument("seconds", nargs="?", type=float, default=8.0)
+    ap.add_argument("--mesh", default="skinned",
+                    choices=("tubes", "skinned"),
+                    help="hand mesh mode for both rigs")
+    args = ap.parse_args()
+    main(args.score, args.seconds, args.mesh)

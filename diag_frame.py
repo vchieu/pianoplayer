@@ -2,7 +2,7 @@
 Profile VirtualKeyboard._frame() and plotter.render() separately, under the
 same conditions as a real playback.
 
-    python diag_frame.py [score.xml] [frames]
+    python diag_frame.py [score.xml] [frames] [--mesh tubes|skinned]
 """
 import cProfile
 import io
@@ -17,7 +17,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
-def main(fn="scores/bach_invention4.xml", nframes=60):
+def main(fn="scores/bach_invention4.xml", nframes=60, mesh="skinned"):
+    from pianoplayer import hand3d as h3d
+    if str(mesh).lower() != "skinned":
+        # minimal mode flag: force both rigs (built inside
+        # VirtualKeyboard.build_RH/LH) into tubes mode.
+        _orig_init = h3d.HandRig.__init__
+
+        def _patched(self, side="right", size="M", *a, **k):
+            k.setdefault("mesh", mesh)
+            _orig_init(self, side, size, *a, **k)
+
+        h3d.HandRig.__init__ = _patched
+    print("mesh mode: %s" % ("tubes" if str(mesh).lower() != "skinned"
+                             else "skinned"))
     from music21 import converter
     from pianoplayer.hand import Hand
     from pianoplayer.scorereader import reader
@@ -77,5 +90,12 @@ def main(fn="scores/bach_invention4.xml", nframes=60):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "scores/bach_invention4.xml",
-         int(sys.argv[2]) if len(sys.argv) > 2 else 60)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("score", nargs="?", default="scores/bach_invention4.xml")
+    ap.add_argument("frames", nargs="?", type=int, default=60)
+    ap.add_argument("--mesh", default="skinned",
+                    choices=("tubes", "skinned"),
+                    help="hand mesh mode for both rigs")
+    args = ap.parse_args()
+    main(args.score, args.frames, args.mesh)

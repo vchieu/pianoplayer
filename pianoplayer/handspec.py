@@ -258,6 +258,7 @@ def geom_hash():
     rep = repr((FINGER_SPECS, FING_R_SCALE, MCP_SHRINK, ARM_PROFILE,
                 ARM_PIN, THENAR, HYPO, WEB_RADII, THUMB_CMC_A,
                 THUMB_CMC_LEN, THUMB_MCP_LEN, THUMB_IP_LEN,
+                THUMB_BASE_Y0, THUMB_FWD, HF_XXS,  # thumb-MCP forward shift
                 REST_MCP_DEG, REST_PIP_DEG, REST_DIP_RATIO, REST_SPREAD,
                 REST_REACH_FRAC, REST_LIFT_Z, FING_Z_FLAT, TIP_PAD_FLAT,
                 PIP_MOUND, DIP_MOUND, MCP_MOUND_R, PALM_ARCH, WEB_K,
