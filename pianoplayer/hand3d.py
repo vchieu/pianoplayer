@@ -759,17 +759,24 @@ class HandRig:
         except Exception:
             pass
         tpath = self.texture_path or _default_tex(self.hf, self.side)
+        _tex_ok = False
         try:
             import os as _os
             if not _os.path.isfile(tpath):
                 build_skin_texture(rest, bones, tpath, names=names,
                                    hf=self.hf, side=self.side)
+            from PIL import Image as _Image
+            with _Image.open(tpath) as _im:
+                _im.verify()  # garbage file -> raise -> keep SKIN below
             mesh.texture(tpath)
+        except Exception:
+            pass  # no texture: keep the SKIN actor colour from _skin_mesh
+        else:
             # R1.5: the texture background already carries the skin tone, so
             # the actor colour must be white -- SKIN x SKIN would square it.
+            # White is set ONLY on success (except-branch keeps SKIN).
+            _tex_ok = True
             mesh.color((1.0, 1.0, 1.0))
-        except Exception:
-            pass
         _material(mesh, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
         B = len(names)
         rigid = np.array([nm in ("forearm", "palm", "f1_cmc") for nm in
@@ -798,8 +805,10 @@ class HandRig:
                           rigid_mask=rigid_mask)
         # R1.6 vertex-blush prep, from the bone weights: dominant finger +
         # distalness (weight on that finger's f?_2 bone).  The RGB scalars
-        # start white (texture shows through: scalars multiply the texture);
-        # a pressed finger blushes only its tip via _tint_skin().
+        # start at the texture base (white: scalars multiply the texture)
+        # or, with no texture, at SKIN -- so a texture failure still shows
+        # a skin-coloured hand, not a white one. A pressed finger blushes
+        # only its tip via _tint_skin().
         try:
             N = rest32.shape[0]
             aff = np.zeros((N, 5), np.float32)
@@ -816,15 +825,21 @@ class HandRig:
             dist = dst[np.arange(N), dom].astype(np.float32)
             self._skin["dom"] = dom
             self._skin["dist"] = np.clip(dist, 0.0, 1.0)
-            rgb = np.full((N, 3), 255, np.uint8)
+            if _tex_ok:
+                base255 = np.array([255, 255, 255], np.uint8)
+            else:
+                base255 = (np.clip(np.asarray(self.skin, float), 0.0, 1.0)
+                            * 255.0 + 0.5).astype(np.uint8)
+            rgb = np.tile(base255[None, :], (N, 1))
             arr = numpy_to_vtk(rgb, deep=0)
             arr.SetName("RGB")
             mesh.dataset.GetPointData().SetScalars(arr)
             mesh.mapper.SetColorModeToDirectScalars()
-            mesh.color((1.0, 1.0, 1.0))
+            mesh.color((1.0, 1.0, 1.0) if _tex_ok else self.skin)
             self._skin["blush"] = rgb
             self._skin["blush_arr"] = arr
             self._skin["blush_col"] = {}
+            self._skin["blush_base"] = base255
         except Exception:
             pass
         # seed the skin chains (world) from the rest pose so a partial fan
@@ -1046,13 +1061,16 @@ class HandRig:
                                                               1.0))
             m = (S["dom"] == (f - 1)) & (w > 0.0)
             rgb = S["blush"]
+            base = np.asarray(S.get("blush_base", (255, 255, 255)),
+                              float)[None, :]
             rgb[m] = (np.clip(
-                1.0 - w[m, None] * (1.0 - np.asarray(_SKIN_PRESS_MUL,
-                                                    float)[None, :]),
-                0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-            # released verts back to white
+                base * (1.0 - w[m, None] * (1.0 - np.asarray(_SKIN_PRESS_MUL,
+                                                            float)[None, :])),
+                0.0, 255.0) + 0.5).astype(np.uint8)
+            # released verts back to the base (white textured, SKIN plain)
             m0 = (S["dom"] == (f - 1)) & (w == 0.0)
-            rgb[m0] = 255
+            rgb[m0] = np.asarray(S.get("blush_base", (255, 255, 255)),
+                                 np.uint8)
             S["blush_arr"].Modified()
             S["mesh"].actor.Modified()
         except Exception:

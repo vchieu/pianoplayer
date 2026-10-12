@@ -51,7 +51,7 @@ FINGER_SPECS = {
 FING_R_SCALE = {1: 1.0, 2: 1.10, 3: 1.12, 4: 1.13, 5: 1.13}
 
 # R1.2: MCP spacing shrink (fraction) applied to fingers 2-5 about the
-# middle-finger base x.  5% closes the rest gap to [0, 0.15] cm together
+# middle-finger base x.  2% closes the rest gap to [0, 0.15] cm together
 # with the de-inflated SDF radii; bases move <= 0.26 cm (reach-safe: the
 # root chases the fan mean and IK stays exact).
 MCP_SHRINK = 0.02
@@ -177,7 +177,12 @@ def thumb_base_y(hf):
 
 # --------------------------------------------------------------------------- #
 # thumb CMC anatomy (R2.5 targets; IK keeps FINGER_SPECS lens until R5.3)
-# --------------------------------------------------------------------------- #
+# NOTE (honest status): THUMB_CMC_LEN / THUMB_MCP_LEN / THUMB_IP_LEN
+# and THENAR_ANGLE_DEG / THUMB_ABDUCT_DEG are anatomy targets for the
+# articulated CMC (R5.3, deferred): IK and the SDF still use the single
+# FINGER_SPECS[1] chain until then. They feed geom_hash() so retuning
+# rebuilds the cache. THUMB_CMC_A (thenar origin) IS wired into the
+# geometry (rest_chains + SDF thenar pair).
 THUMB_CMC_A = (-3.0, -0.5, 0.3)  # thenar origin (hf=1, right-hand local)
 THUMB_CMC_LEN = 4.4      # CMC -> MCP (metacarpal) x hf
 THUMB_MCP_LEN = 3.3      # MCP -> IP (proximal phalanx) x hf
@@ -192,10 +197,19 @@ WEB_POS_Z = 0.70
 
 # --------------------------------------------------------------------------- #
 # rest pose = average playing pose (R2.6 targets)
+#
+# NOTE (R2.6 honest status): only REST_DIP_RATIO, REST_SPREAD,
+# REST_REACH_FRAC and REST_LIFT_Z shape the geometry -- rest_chains()
+# places a target (spread + REACH_FRAC of the chain length + lift) and
+# solves it with solve_chain(coupling=REST_DIP_RATIO). REST_MCP_DEG /
+# REST_PIP_DEG are the angle targets that pose is meant to approximate;
+# they are NOT wired into the solver (a target-based solve cannot take
+# joint angles as input) -- they pin the intent and feed geom_hash() so
+# retuning them rebuilds the cache. Do not fake-wire them.
 # --------------------------------------------------------------------------- #
-REST_MCP_DEG = 20.0
-REST_PIP_DEG = 35.0
-REST_DIP_RATIO = 0.65    # DIP = 0.65 x PIP
+REST_MCP_DEG = 20.0      # target MCP flexion of the rest pose (hash only)
+REST_PIP_DEG = 35.0      # target PIP flexion of the rest pose (hash only)
+REST_DIP_RATIO = 0.65    # DIP = 0.65 x PIP (wired: solve_chain coupling)
 REST_SPREAD = 0.30       # lateral splay per finger step (x hf)
 REST_REACH_FRAC = 0.92   # rest target distance as a fraction of chain length
 REST_LIFT_Z = 0.15       # rest target lift above the MCP plane (x hf)
@@ -208,7 +222,10 @@ TIP_PAD_FLAT = 0.72      # fingertip pad ellipsoid flattening (z)
 PIP_MOUND = 1.06         # PIP joint sphere radius multiplier
 DIP_MOUND = 1.03         # DIP joint sphere radius multiplier
 MCP_MOUND_R = 0.55       # MCP mound sphere radius as a fraction of spacing
-PALM_ARCH = 0.18         # dorsal arch height factor (z(x) curve)
+PALM_ARCH = 0.18         # dorsal arch height factor (z(x) curve) --
+                         # target only (hash): the loft/SDF approximate the
+                         # arch via the station thickness profile (R-dev3),
+                         # no explicit transverse arch term exists yet
 WEB_K = 0.25             # smin k inside the interdigital web band
 WEB_Y_LO = -1.6          # web band lower edge rel. knuckle line (x hf)
 WEB_Y_HI = 1.2           # web band upper edge rel. knuckle line (x hf)
@@ -223,11 +240,21 @@ K_BODY = 0.30            # forearm/palm ellipsoid chain
 GRID_STEP = 0.15         # Deviation (H6): 0.12 -> 0.15, SDF ~3s not ~7s
 GRID_Y0 = -24.0          # fixed proximal border (stub pole closes inside)
 TRIS_MAX = 8000
-HANDMESH_VERSION = "v3"  # v3: SDF v2 (elliptical sections, pad tips, y-web)
+HANDMESH_VERSION = "v4"  # v4: thumb MCP base matches the rig (was /hf off),
+                         # rest_chains coupling 0.4 -> REST_DIP_RATIO 0.65.
+                         # v3: SDF v2 (elliptical sections, pad tips, y-web)
 
 
 def geom_hash():
-    """8-char sha1 over geometry + SDF constants + grid + version (R1.4)."""
+    """8-char sha1 over geometry + SDF constants + grid + version (R1.4).
+
+    NOTE: the hash covers constants only. Geometry LOGIC changes (e.g. a
+    rest_chains formula or coupling edit) are invisible to it -- bump
+    HANDMESH_VERSION manually with every such change (v3 -> v4 above was
+    exactly this case: the thumb formula reuses unhashed THUMB_BASE_Y0 /
+    THUMB_FWD inputs differently, and the coupling change reuses the
+    unchanged REST_DIP_RATIO value, so the hash alone rebuilt nothing).
+    """
     rep = repr((FINGER_SPECS, FING_R_SCALE, MCP_SHRINK, ARM_PROFILE,
                 ARM_PIN, THENAR, HYPO, WEB_RADII, THUMB_CMC_A,
                 THUMB_CMC_LEN, THUMB_MCP_LEN, THUMB_IP_LEN,

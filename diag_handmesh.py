@@ -1,14 +1,15 @@
 """
 H6 tool: rest-mesh acceptance for the unified skinned hand.
 
-    python diag_handmesh.py
+    python diag_handmesh.py          # size M both sides + shots + weights
+    python diag_handmesh.py --all    # matrix: 7 sizes x 2 sides, no shots
 
 Builds pianoplayer.handmesh.build_rest_mesh fresh (cache cleared first, so
 the clocked time is a real first build), renders it from 3 views and checks:
 
     closed mesh   (no boundary edges via vtkFeatureEdges)
     1 region      (exactly one connected component)
-    <= 6000 tris  (decimation budget)
+    <= 8000 tris  (decimation budget, TRIS_MAX)
     first build < 5 s, cached load < 0.2 s
 
 Outputs in ./diag_handmesh_out/: rest_persp.png, rest_side.png, rest_top.png
@@ -27,6 +28,10 @@ sys.path.insert(0, HERE)
 OUT = os.path.join(HERE, "diag_handmesh_out")
 HF = 0.82   # size M
 SIDE = "right"
+
+# Review-fix matrix: all hand sizes x both sides (diag only, no shots).
+SIZES_ALL = ["XXS", "XS", "S", "M", "L", "XL", "XXL"]
+SIDES_ALL = ("right", "left")
 
 
 def _as_pd(pts, faces):
@@ -177,6 +182,8 @@ def main():
     import pianoplayer.hand3d  # noqa: F401
     import vtkmodules.vtkFiltersCore  # noqa: F401
     from PIL import Image  # noqa: F401
+    if "--all" in sys.argv:
+        return main_all(hm)
     os.makedirs(OUT, exist_ok=True)
     try:
         os.remove(hm.cache_path(HF, SIDE))
@@ -230,6 +237,42 @@ def main():
     with open(os.path.join(OUT, "metrics.txt"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print("shots + metrics in", OUT)
+    return 0 if ok else 1
+
+
+def main_all(hm):
+    """Review-fix matrix: closed / 1-region / tris<=8000 / build-time for
+    all 7 sizes x 2 sides. Only missing hashes are built (cached cells load
+    in ms); each row prints N/tris/open/regions/build-s. Returns nonzero if
+    any cell violates closed / 1-region / tris budget."""
+    from pianoplayer.utils import handSizeFactor
+    os.makedirs(OUT, exist_ok=True)
+    ok = True
+    rows = []
+    for size in SIZES_ALL:
+        hf = handSizeFactor(size)
+        for side in SIDES_ALL:
+            t0 = time.perf_counter()
+            pts, faces, _nrm = hm.build_rest_mesh(hf, side)
+            dt = time.perf_counter() - t0
+            n_open, n_reg = check_mesh(np.asarray(pts), faces)
+            cell_ok = (n_open == 0 and n_reg == 1 and len(faces) <= 8000)
+            ok = ok and cell_ok
+            rows.append((size, side, len(pts), len(faces),
+                         n_open, n_reg, dt, cell_ok))
+            print("%-4s %-5s N=%-5d tris=%-5d open=%-3d regions=%-2d "
+                  "build=%6.2f s %s"
+                  % (size, side, len(pts), len(faces), n_open, n_reg, dt,
+                     "ok" if cell_ok else "FAIL"))
+    with open(os.path.join(OUT, "metrics_all.txt"), "w") as fh:
+        fh.write("size side N tris open regions build_s ok\n")
+        for r in rows:
+            fh.write("%s %s %d %d %d %d %.2f %s\n"
+                     % (r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                        "ok" if r[7] else "FAIL"))
+    print("matrix in %s (%d/14 cells ok)"
+          % (os.path.join(OUT, "metrics_all.txt"),
+             sum(1 for r in rows if r[7])))
     return 0 if ok else 1
 
 

@@ -218,10 +218,6 @@ def _ellipsoid(p, c, r):
 # --------------------------------------------------------------------------- #
 # rest pose (F1) + bones
 # --------------------------------------------------------------------------- #
-def _thumb_by_for(hf):
-    return H.thumb_base_y(float(hf))
-
-
 def rest_chains(hf):
     """R2.6 rest joints: {finger: q (4,3)} + thumb CMC start, right-hand local.
 
@@ -236,7 +232,10 @@ def rest_chains(hf):
         spec = H.FINGER_SPECS[f]
         bx, by, bz = H.mcp_base(f)
         if f == 1:
-            by = H.thumb_base_y(hf) / hf  # scaled by hf below
+            # thumb MCP in hf=1 units (same convention as the rig:
+            # HandRig._thumb_by = thumb_base_y(hf), scaled by hf in _L
+            # below); must match the rig exactly (reach-tested authority).
+            by = H.thumb_base_y(hf)
         base = np.array([bx * hf, by * hf, bz * hf])
         lens = [l * hf for l in spec["lens"]]
         L = sum(lens)
@@ -244,7 +243,10 @@ def rest_chains(hf):
         target = base + np.array([spread, L * H.REST_REACH_FRAC,
                                   H.REST_LIFT_Z * hf])
         pole = np.array(spec["pole"], float)
-        pts, _ = solve_chain(base, target, lens, pole)
+        # R2.6: same DIP coupling as the rig (HandRig.COUPLING ==
+        # REST_DIP_RATIO), so the rest curl matches the playing curl.
+        pts, _ = solve_chain(base, target, lens, pole,
+                             coupling=H.REST_DIP_RATIO)
         chains[f] = np.array(pts, float)
     cmc_a = np.array(H.THUMB_CMC_A) * hf
     return chains, cmc_a
@@ -743,9 +745,10 @@ def compute_weights(rest_pts, bones, rigid_names=("forearm", "palm"),
 def get_rest_data(hf, side="right"):
     """Full cached rest set: pts/faces/nrm/idx/w/bones/names/P0/R0."""
     s = "left" if str(side).lower().startswith("l") else "right"
+    path = cache_path(hf, s)
     bones, names = rest_bones(hf, s)
     _, _, P0, R0 = rest_frames(hf, s)
-    z = _load_cache(cache_path(hf, s))
+    z = _load_cache(path)
     if z is not None:
         try:
             if {"rest_pts", "faces", "rest_nrm", "idx", "w"} <= set(z.files):

@@ -213,15 +213,24 @@ class _Player:
         self.finger_x = {}
 
 
-def _aim_fingers(notes, now, lead=AIM_LEAD):
+def _aim_fingers(notes, now, lead=AIM_LEAD, start=0):
     """Fingers of not-yet-fired notes starting within `lead` s (R1.8).
 
     Module-level so the rule is unit-testable without a scene: every
     finger that must strike imminently aims exactly at its key instead
     of drifting toward its relaxed slot.
+
+    `notes` is sorted by `t_on`, so the scan starts at `start` (the
+    caller passes `p.fire`: everything before it already fired) and
+    stops at the first note at/after the lead horizon.
     """
-    return {e.finger for e in notes
-            if e.finger and not e.fired and (e.t_on - now) < lead}
+    out = set()
+    for e in notes[start:]:
+        if (e.t_on - now) >= lead:
+            break
+        if e.finger and not e.fired:
+            out.add(e.finger)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -994,7 +1003,7 @@ class VirtualKeyboard:
         p.finger_x = fx
         # R1.8: every finger striking within AIM_LEAD aims exactly at its
         # key (no drift toward the relaxed slot before the press).
-        p.aim_fingers = _aim_fingers(notes, now)
+        p.aim_fingers = _aim_fingers(notes, now, start=p.fire)
 
         # is a black key coming up soon? -------------------------------------
         advance = bool(target is not None and target.black

@@ -189,7 +189,7 @@ around the wrist (`0.4 * atan2(root_x - shoulder_x, 45)`, clamped
 
 Root follows hand size: `ROOT_Y`/`ROOT_Z` scale with `hf` (reach fraction
 0.69, `ROOT_Z = 2.0*(0.50+0.60*hf)`, `BLACK_SHIFT = 1.15`), the thumb MCP
-moves forward with `hf` (`THUMB_BASE_Y0 = 3.4`, `THUMB_FWD = 4.4`, thumb
+moves forward with `hf` (`THUMB_BASE_Y0 = 3.55`, `THUMB_FWD = 4.4`, thumb
 contact 0.65 cm nearer the player) and the pinky contact retreats 0.80 cm
 (`_PINKY_CONTACT_DY`). All geometry lives in `handspec.py` (single source:
 finger base/lens/radii, `ARM_PROFILE` with a `check_palm_monotonic()`
@@ -226,21 +226,29 @@ constant `tempo` is used. While a finger holds a key, that finger stays
 exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
 the next note.
 
-## Unified skinned hand mesh (Tier B, v2.5.0)
+## Unified skinned hand mesh (Tier B, v2.6.0)
 
 **Rest mesh** (`handmesh.build_rest_mesh`): One smooth-unioned mesh per hand
 built from a signed-distance field (SDF) in wrist-local rest pose (F1: slight
-curl + spread solved by `solve_chain`). Primitives: forearm/palm ellipsoid
-chain from `_ARM` stations (proximal stations replaced by 5 unscaled stubs),
-per-finger 2 tapered capsules + PIP joint sphere, thumb CMC capsule. Combination
-uses `smin` (-k*logaddexp) for intra-finger (k=0.05), finger↔palm/thenar
-(k=0.47), thumb-CMC↔palm (k=0.40), body chain (k=0.30); plain `min()` for
-finger↔finger so neighbours touch but never fuse (F2). Grid step 0.15 cm over
-adaptive bounds; `vtkFlyingEdges3D` iso=0 → `vtkWindowedSincPolyDataFilter`
-(15 iter) → `vtkQuadricDecimation` (≤6000 tris) → normals. Cached to
-`~/.cache/pianoplayer/handmesh_{side}_{hf:.2f}_v1.npz` (rest_pts, faces,
-rest_nrm). First build ~4.3 s, cached load ~0.04 s. Left hand mirrors x +
-reverses face winding (same as `_arm_surface`).
+curl + spread solved by `solve_chain` with `coupling = REST_DIP_RATIO`,
+same as the rig). Primitives: forearm/palm ellipsoid chain from
+`ARM_PROFILE` stations (2 farthest replaced by 5 unscaled stubs) + thenar
+pair + hypothenar + 4 MCP mounds, per-finger 3 elliptical capsules +
+MCP/PIP/DIP spheres + flattened pad-tip ellipsoid, thumb CMC capsule.
+Combination uses `smin` (`-k*logaddexp`): intra-finger `k=0.05`,
+finger/body joins `k=0.35`, thumb-CMC/body `k=0.40`, body chain `k=0.30`;
+y-dependent webbing (`smin k=0.25` inside the web band, plain `min()`
+outside so neighbours touch but never fuse, F2); thumb<->index web `k=0.50`.
+Grid step 0.15 cm over adaptive bounds; `vtkFlyingEdges3D` iso=0 →
+`vtkWindowedSincPolyDataFilter` (15 iter) → `vtkQuadricDecimation`
+(≤8000 tris, `TRIS_MAX`) → normals. Cached to
+`~/.cache/pianoplayer/handmesh_{side}_{hf:.2f}_{geomhash}.npz`
+(`get_rest_data` stores the full set there: rest_pts, faces, rest_nrm plus
+`idx`/`w` weights; `build_rest_mesh` alone stores the first three).
+First build <5 s, cached load <0.2 s. Left hand mirrors x +
+reverses face winding (same as `_arm_surface`). `geom_hash()` covers
+constants only -- geometry logic changes need a manual `HANDMESH_VERSION`
+bump (v4: thumb MCP base matches the rig, rest coupling 0.65).
 
 **Skinning weights** (`handmesh.compute_weights`): 18 bones (forearm, palm,
 f1_cmc + 3 per finger). Distance-to-segment `d`; weight `w = exp(-((d-d_min)/0.45)^2)`;
@@ -257,14 +265,15 @@ rigid verts (1.0 weight) get single transform; non-rigid use 4-bone blend via
 accuracy vs IK `q[3]` ≤0.05 cm in press/rest poses; L/R mirror symmetry holds.
 
 **Procedural skin texture** (`handmesh.build_skin_texture`): 512² PNG written
-to cache dir (`handtex_v2.png`), loaded via path; `texture_path` ctor param
+to cache dir (`handtex_{side}_{hf:.2f}_{geomhash}.png`), loaded via path; `texture_path` ctor param
 overrides with user photo (same planar UV). Base tone `(0.95,0.80,0.70)` ±3%
 two-octave value noise (PIL upscaled). Joint-crease bands (~12% dark + light
 ridge) at each finger's MCP/PIP/DIP v-rows across its u-span. 2–3 palm-crease
 arcs. Per-fingertip nail ellipse (`(0.97,0.82,0.74)` → whiter tip + cuticle
 arc). Fingertip/palm-edge blush + pore speckle. Planar UV from rest bounds
 (`u=(x-xmin)/W`, `v=(y-ymin)/H`), static TCoords at build. `Mesh.texture(path)`
-applied.
+applied; the actor colour goes white only when the texture loads --
+a missing/garbage texture keeps the SKIN colour (fallback).
 
 **API**: `HandRig(mesh="tubes"|"skinned", texture_path=None)` default flips to
 `"skinned"` after acceptance; tubes stay as automatic fallback (try/except +
@@ -273,8 +282,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.5.0'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.5.0"`).
+  `setup.py` (`version='2.6.0'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.6.0"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

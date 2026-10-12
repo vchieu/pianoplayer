@@ -137,8 +137,9 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   with per-size/side procedural skin texture (tone noise, joint creases,
   nails, fingertip blush) and a press blush baked into vertex colours
   (multiplied with the texture). Tubes remain as automatic fallback.
-  The rest mesh is cached under a geometry-hash name (~4 s first build,
-  ~40 ms cached); skinning runs in ~2.7 ms/frame per hand;
+  The rest mesh is cached under a geometry-hash name (first build <5 s;
+  the full mesh + skinning-weight set is cached, so a warm start loads
+  instead of rebuilding); skinning runs in ~2.7 ms/frame per hand;
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent;
 - **tempo comes from the score**: every note - including chords - sounds at

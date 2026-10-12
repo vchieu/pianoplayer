@@ -26,7 +26,9 @@ class INote:
         self.duration = 0.0
         self.time_real = 0.0     # true onset (quarter lengths), for playback
         self.dur_real  = 0.0     # true duration, for playback
-        self.t_sec    = 0.0      # true onset in seconds (via tempo map), F1
+        self.t_sec    = None     # true onset in seconds (via tempo map), F1
+                                     # None = unstamped: _dt_sec falls back to
+                                     # quarters at FALLBACK_BPM (hand.py)
         self.fingering= 0
         self.measure  = 0
         self.chordnr  = 0
@@ -180,7 +182,7 @@ def reader(sf, beam=0, tempo_map=None):
         try:
             an.t_sec = beat_to_seconds(float(an.time_real), tm)
         except Exception:
-            an.t_sec = 0.0
+            an.t_sec = None  # unstamped: _dt_sec falls back to quarters
     return noteseq
 
 

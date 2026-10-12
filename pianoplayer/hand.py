@@ -162,7 +162,11 @@ class Hand:
         if fa==fb and abs(xba)>1e-9:
             if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
                 return HARD  # finger still holding na: cannot replay (B2)
-            if _dt_sec(na, nb) <= SAME_FINGER_MAX_DT:
+            # F3 boundary is inclusive (eighth notes at 120 bpm sit exactly
+            # at 0.25 s); the +1e-6 epsilon keeps the boundary stable against
+            # float rounding in beat_to_seconds (a computed 0.2500000001 s
+            # must stay HARD, a computed 0.2499999999 s likewise).
+            if _dt_sec(na, nb) <= SAME_FINGER_MAX_DT + 1e-6:
                 return HARD  # too fast to lift and re-place the finger
             return SAME_FINGER_BASE + SAME_FINGER_DX * abs(xba)
         if fa>1 : # if a is not thumb
@@ -211,7 +215,9 @@ class Hand:
         # F2: hammering one key with one finger gets tiring fast: penalise
         # same-finger repeats below REPEAT_MAX_DT, linearly up to
         # REPEAT_PENALTY for a zero gap. Slow repeats (dt >= 0.25 s) are
-        # free, so the solver may keep the finger there.
+        # free, so the solver may keep the finger there. Strict `<` (no
+        # epsilon): a repeat exactly at the boundary is free by design,
+        # unlike the F3 reuse ban above which is inclusive by design.
         if fa==fb and same_key and dt_gap < REPEAT_MAX_DT:
             cost += REPEAT_PENALTY * (REPEAT_MAX_DT - dt_gap) / REPEAT_MAX_DT
         # B3: weak fingers (4, 5) must not jump far on short notice.
