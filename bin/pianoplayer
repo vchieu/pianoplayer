@@ -8,6 +8,7 @@ import os, sys
 from music21 import converter, stream
 from pianoplayer.hand import Hand
 from pianoplayer.scorereader import reader, PIG2Stream
+from pianoplayer.utils import score_tempo_map
 
 
 if len(sys.argv) < 2: # no args are passed, pop up GUI
@@ -88,15 +89,21 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             self.sf = sf
             self.rh = None
             self.lh = None
+            # F1: the solver measures gaps in seconds, so stamp every
+            # note with the score's own tempo map (same map the player
+            # uses for playback timing).
+            tempo_map = score_tempo_map(sf)
 
             if self.Rcb.get():
                 self.rh = Hand("right", self.handsize.get())
-                self.rh.noteseq = reader(sf, beam=self.RightHandBeam)
+                self.rh.noteseq = reader(sf, beam=self.RightHandBeam,
+                                         tempo_map=tempo_map)
                 self.rh.generate(nmeasures=self.meas.get())
 
             if self.Lcb.get():
                 self.lh = Hand("left", self.handsize.get())
-                self.lh.noteseq = reader(sf, beam=self.LeftHandBeam)
+                self.lh.noteseq = reader(sf, beam=self.LeftHandBeam,
+                                         tempo_map=tempo_map)
                 self.lh.generate(nmeasures=self.meas.get())
 
             print("Saving score to output.xml")
@@ -198,6 +205,8 @@ else: ##########################################################################
     else:
         sf = converter.parse(xmlfn)
 
+    # F1: stamp note onsets in seconds with the score's own tempo map.
+    tempo_map = score_tempo_map(sf)
 
     if not args.left_only:
         rh = Hand("right", hand_size)
@@ -209,7 +218,7 @@ else: ##########################################################################
             rh.depth = args.depth
         rh.lyrics = args.below_beam
 
-        rh.noteseq = reader(sf, beam=args.rbeam)
+        rh.noteseq = reader(sf, beam=args.rbeam, tempo_map=tempo_map)
         rh.generate(args.start_measure, args.n_measures)
 
     if not args.right_only:
@@ -222,7 +231,7 @@ else: ##########################################################################
             lh.depth = args.depth
         lh.lyrics = args.below_beam
 
-        lh.noteseq = reader(sf, beam=args.lbeam)
+        lh.noteseq = reader(sf, beam=args.lbeam, tempo_map=tempo_map)
         lh.generate(args.start_measure, args.n_measures)
 
     sf.write('xml', fp=args.outputfile)

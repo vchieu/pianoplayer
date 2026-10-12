@@ -55,20 +55,27 @@ on `bach_invention4.xml` the Viterbi cost beats the legacy cost.
 
 **Cost function** (`pair_cost`, same formula as the old `ave_velocity`): for
 each consecutive note pair, `v = dx / (dt + 0.1)` where `dx` is the distance
-the finger travels on the keyboard (cm) and `dt` is the inter-onset time (s).
+the finger travels on the keyboard (cm) and `dt` is the inter-onset time in
+seconds (`INote.t_sec`, stamped by `reader()` through `utils.beat_to_seconds`
+from the score tempo map; the CLI/GUI pass `score_tempo_map(sf)`). Same key
+repeated: every finger starts from reach 0 and a same-finger repeat faster
+than 0.25 s pays `REPEAT_PENALTY = 6` scaled linearly to zero gap (F2), so
+fast repeats alternate fingers while slow ones may keep the finger.
 Black-key notes are penalized by dividing `v` by
 `weights[finger] * bfactor[finger]` -- a *lower* `bfactor` means a *stronger*
 black-key penalty, so the thumb (0.3) is penalized most and the middle finger
 (1.1) least. Fingers 4/5 jumping far (`> WEAK_FINGER_MIN_JUMP = 3.0` cm)
-on a short gap (`< WEAK_FINGER_MAX_DT = 0.3` quarters ~ 0.15 s at 120 bpm)
-pay `WEAK_FINGER_PENALTY = +3`. Lower total is better.
+on a short gap (`< WEAK_FINGER_MAX_DT = 0.15` s, measured in seconds through
+the score tempo map -- see F1) pay `WEAK_FINGER_PENALTY = +3`. Lower total is better.
 
 **Skip rules** (`_skip_penalty`, hard-soft with `HARD = 200.0` added per
 violation, applied to **every** consecutive pair including chord<->note):
 same finger on two different notes/pitches, finger crossings, thumb-to-black
 crossings, and (inside chords) finger-order violations plus a set of
 normalized stretch thresholds (`axba = |dx| * hf / 0.8` vs. finger-pair
-limit). Soft (added cost, still losable) rather than pruning, so a legacy
+limit). Same finger on different keys is HARD only while the first note is
+still held or the gap is at most 0.25 s; slower reuse pays a soft
+`SAME_FINGER_BASE + 0.15 * |dx|` (F3). Soft (added cost, still losable) rather than pruning, so a legacy
 finger 0 or an impossible spot never kills a whole solution.
 
 **Held-finger constraint** (`pair_cost` + `_repair_held`): when note `a` still
@@ -182,22 +189,30 @@ around the wrist (`0.4 * atan2(root_x - shoulder_x, 45)`, clamped
 
 Root follows hand size: `ROOT_Y`/`ROOT_Z` scale with `hf` (reach fraction
 0.69, `ROOT_Z = 2.0*(0.50+0.60*hf)`, `BLACK_SHIFT = 1.15`), the thumb MCP
-moves forward with `hf` and the pinky contact retreats 0.80 cm
-(`_PINKY_CONTACT_DY`). Palm/arm loft uses the `_ARM` stations with a
-`_THENAR = 0.50` thumb-side bulge and a static thenar-web ellipsoid; finger
-sections are elliptical (flatter back, belly pad, flatter distal segment) with web thickening near
-the knuckles. Idle fingers relax 75% toward their natural parallel slots
+moves forward with `hf` (`THUMB_BASE_Y0 = 3.4`, `THUMB_FWD = 4.4`, thumb
+contact 0.65 cm nearer the player) and the pinky contact retreats 0.80 cm
+(`_PINKY_CONTACT_DY`). All geometry lives in `handspec.py` (single source:
+finger base/lens/radii, `ARM_PROFILE` with a `check_palm_monotonic()`
+gate, rest angles, thumb CMC targets, SDF constants, `geom_hash()`).
+Palm/arm loft uses the `ARM_PROFILE` stations with a small `THENAR = 0.28`
+thumb-side bulge; finger sections are elliptical (flatter back, belly pad,
+flatter distal segment) with web thickening near
+the knuckles. Idle fingers glide toward the fan (`SMOOTH_TAU = 0.05`,
+max ~0.4 cm/frame) then relax 75% toward their natural parallel slots
 (`_IDLE_NATURAL_LERP`, idle thumb splays `0.5*hf` outward) and extend forward
 (`_IDLE_FWD`) at per-finger `REST_LIFT` heights with
 a small `0.08*sin(2π*0.35*t)` breathing oscillation (offsets scaled by
-`hf/0.82`); fingers in the `held` set (or aiming) keep exact targets and the
-root spring chases the pre-lerp fan mean, so held fingers never drift. Joint rings get darker vertex colours; nails are a subtle vertex-colour patch
+`hf/0.82`); fingers in the `held`/`aim_fingers` sets (see `vkeyboard._pump`)
+keep exact targets and the root spring chases the pre-lerp fan mean, so
+held fingers never drift. Joint rings get darker vertex colours; nails are a subtle vertex-colour patch
 (no mesh, no white dots); pressed fingers blush only near the tip
 (`smoothstep(0.6,1.0,snorm)`) with contact AO baked into the pad side;
-each hand carries one opaque whole-palm blob shadow flattened onto `z'=1.6`
-(hidden in the perspective view). Skin material is ambient 0.40 / diffuse
+each hand carries one opaque blob shadow of the *skinned* mesh flattened
+onto `z'=1.6` (world-projection, hidden in the perspective view). Skin material is ambient 0.40 / diffuse
 0.70 with side-edge darkening, FXAA on (MSAA stays 0). A finger holding a key (`press > 0.5`) whose `tip_err >
-0.1 cm` makes the root chase with fast `TAU = 0.03` for that frame.
+0.1 cm` makes the root chase with fast `TAU = 0.03` for that frame, and a
+stretched hold (`tip_err > 0.3`) additionally drags the root target toward
+its own key (proportional pull, ≤0.4) so legato stretches stay attached.
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
 

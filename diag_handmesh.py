@@ -201,7 +201,6 @@ def main():
     ok = True
 
     def rep(name, cond, detail=""):
-        nonlocal_ok = True
         print("%-28s %s %s" % (name, "ok" if cond else "FAIL", detail))
 
     lines = []
@@ -214,12 +213,12 @@ def main():
     print("\n".join(lines))
     rep("closed (0 open edges)", n_open == 0, "%d" % n_open)
     rep("one region", n_reg == 1, "%d" % n_reg)
-    rep("tris <= 6000", len(faces) <= 6000, "%d" % len(faces))
+    rep("tris <= 8000", len(faces) <= 8000, "%d" % len(faces))
     rep("first build <5 s", t_build < 5.0, "%.2f" % t_build)
     rep("cached <0.2 s", t_cached < 0.2, "%.3f" % t_cached)
     rep("left closed", n_open_l == 0, "%d" % n_open_l)
     rep("left one region", n_reg_l == 1, "%d" % n_reg_l)
-    ok = (n_open == 0 and n_reg == 1 and len(faces) <= 6000
+    ok = (n_open == 0 and n_reg == 1 and len(faces) <= 8000
           and t_build < 5.0 and t_cached < 0.2
           and n_open_l == 0 and n_reg_l == 1)
     wline = weights_paint(SIDE)

@@ -3,7 +3,7 @@ Created on Thu Nov 26 19:22:20 2015
 
 @author: marco musy
 """
-from pianoplayer.utils import keypos
+from pianoplayer.utils import beat_to_seconds, keypos, score_tempo_map
 
 
 def _flat(stream):
@@ -26,6 +26,7 @@ class INote:
         self.duration = 0.0
         self.time_real = 0.0     # true onset (quarter lengths), for playback
         self.dur_real  = 0.0     # true duration, for playback
+        self.t_sec    = 0.0      # true onset in seconds (via tempo map), F1
         self.fingering= 0
         self.measure  = 0
         self.chordnr  = 0
@@ -35,9 +36,18 @@ class INote:
 
 
 #####################################################
-def reader(sf, beam=0):
+def reader(sf, beam=0, tempo_map=None):
+    """Read beam `beam` of score `sf` into a list of INote.
+
+    `tempo_map` ([(offset_quarters, bpm), ...]) stamps each note's `t_sec`
+    (true onset in seconds); when None it is derived from the score itself
+    via `score_tempo_map`. The fingering solver (`hand.py`) measures gaps
+    in seconds (F1), so callers must pass the same map the player uses.
+    """
 
     noteseq = []
+
+    tm = tempo_map if tempo_map is not None else score_tempo_map(sf)
 
     if hasattr(sf, 'parts'):
         if len(sf.parts) <= beam:
@@ -166,6 +176,11 @@ def reader(sf, beam=0):
     if len(noteseq)<1:
         print("Beam is empty.")
         return []
+    for an in noteseq:
+        try:
+            an.t_sec = beat_to_seconds(float(an.time_real), tm)
+        except Exception:
+            an.t_sec = 0.0
     return noteseq
 
 

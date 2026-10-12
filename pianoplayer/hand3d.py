@@ -65,6 +65,7 @@ from pianoplayer.utils import (
     key_drop,
     key_is_black,
 )
+from pianoplayer import handspec as _HS
 
 # --------------------------------------------------------------------------- #
 # looks
@@ -86,25 +87,26 @@ FINGERS = (1, 2, 3, 4, 5)
 # written: the thumb (MCP 6.2 cm behind the fingers, only 0.6 cm longer) runs
 # out of reach on big hands while the middle finger over-folds on black keys,
 # and no single root translation satisfies both (see Deviations).  Kept shape:
-_ROOT_CONTACT_Y = -3.0    # mean CONTACT_Y_WHITE: where fingertips meet the keys
-_ROOT_WRIST_GAP = 8.6     # wrist-to-MCP span carried by the palm (x hf)
-_ROOT_REACH_FRAC = 0.69   # tuned 0.62 -> 0.69: MCP standoff as a fraction of
-                          # the middle-finger length
-_ROOT_Z_BASE = 2.0        # ROOT_Z = BASE * (C0 + K*hf); tuned from
-_ROOT_Z_C0 = 0.50         #   2.3 * (0.6 + 0.4*hf): lower for small hands
-_ROOT_Z_HF_K = 0.60       #   (dz dominates), higher for large ones (bend room)
+_ROOT_CONTACT_Y = _HS.ROOT_CONTACT_Y    # mean CONTACT_Y_WHITE
+_ROOT_WRIST_GAP = _HS.ROOT_WRIST_GAP    # wrist-to-MCP span carried by palm
+_ROOT_REACH_FRAC = _HS.ROOT_REACH_FRAC  # MCP standoff as fraction of
+                                        # the middle-finger length
+_ROOT_Z_BASE = _HS.ROOT_Z_BASE  # ROOT_Z = BASE * (C0 + K*hf); tuned from
+_ROOT_Z_C0 = _HS.ROOT_Z_C0      #   2.3 * (0.6 + 0.4*hf): lower for small hands
+_ROOT_Z_HF_K = _HS.ROOT_Z_HF_K  #   (dz dominates), higher for large (bend room)
 # D1b: the thumb MCP sits progressively further forward as the hand grows;
 # without this the thumb cannot reach either key colour at L/XL/XXL while the
-# middle finger must not over-fold (same root serves both).  XXS keeps the
-# as-shipped 2.4; the shift is in world cm so small hands are untouched.
-_THUMB_BASE_Y0 = 2.4
-_THUMB_FWD = 3.6           # thumb base y += FWD * (hf - HF_XXS)
-_HF_XXS = 0.33
+# middle finger must not over-fold (same root serves both).
+_THUMB_BASE_Y0 = _HS.THUMB_BASE_Y0
+_THUMB_FWD = _HS.THUMB_FWD       # thumb base y += FWD * (hf - HF_XXS)
+_HF_XXS = _HS.HF_XXS
 # D1c: the pinky is ~2*hf shorter than the middle finger but starts from
 # almost the same knuckle, so it runs out of reach on white keys at every
 # size.  Its contact point sits this much closer to the player (world cm,
 # both colours; still on the key).
-_PINKY_CONTACT_DY = 0.80
+_PINKY_CONTACT_DY = _HS.PINKY_CONTACT_DY
+# D1c (thumb twin): the anatomical thumb contacts its key nearer the player.
+_THUMB_CONTACT_DY = _HS.THUMB_CONTACT_DY
 # D3: arm yaw around the wrist so the forearm angles outward toward the
 # elbow.  shoulder_x = kb_center +/- 15 (right hand's shoulder sits right of
 # centre, left hand's left of it); the 88-key span centre is fixed geometry.
@@ -130,47 +132,25 @@ _THUMB_SPLAY = 0.5
 _IDLE_FWD = {1: 1.2, 2: 1.2, 3: 1.7, 4: 1.2, 5: 1.2}
 
 # --------------------------------------------------------------------------- #
-# geometry of the hand, in cm, for a size-L (hf = 1.0) right hand
-#   base : MCP joint position in the local hand frame
-#   lens : MCP->PIP, PIP->DIP, DIP->tip lengths
-#   radii: MCP, PIP, DIP, fingertip radii
-#   pole : preferred side the finger arches toward (upwards)
+# geometry of the hand -- single source of truth is pianoplayer/handspec.py
+# (R0.2, imported at top as _HS).  The _NAMES below stay as import aliases
+# so diagnostics and the mesh module keep working unchanged.
 # --------------------------------------------------------------------------- #
 _SPECS = {
-    1: dict(base=(-5.6, 2.4, 0.45), lens=(4.2, 3.0, 2.5),
-            radii=(1.06, 0.96, 0.83, 0.70), pole=(0.15, 0.55, 1.00)),
-    2: dict(base=(-2.1, 8.2, 1.85), lens=(3.9, 2.5, 2.0),
-            radii=(0.96, 0.89, 0.77, 0.65), pole=(0.00, 0.35, 1.00)),
-    3: dict(base=(0.15, 8.6, 1.95), lens=(4.3, 2.7, 2.1),
-            radii=(0.98, 0.91, 0.79, 0.66), pole=(0.00, 0.35, 1.00)),
-    4: dict(base=(2.4, 8.3, 1.80), lens=(3.9, 2.5, 2.0),
-            radii=(0.93, 0.86, 0.74, 0.62), pole=(0.00, 0.35, 1.00)),
-    5: dict(base=(4.5, 7.7, 1.60), lens=(3.2, 2.1, 1.8),
-            radii=(0.86, 0.79, 0.68, 0.57), pole=(0.00, 0.30, 1.00)),
+    f: dict(base=_HS.mcp_base(f), lens=tuple(_HS.FINGER_SPECS[f]["lens"]),
+            radii=tuple(_HS.FINGER_SPECS[f]["radii"]),
+            pole=tuple(_HS.FINGER_SPECS[f]["pole"]))
+    for f in _HS.FINGERS
 }
 
 # arm + palm loft: (y, centre-x, half-width, half-thickness, superellipse p)
 # p = 2 is a circle, larger is flatter-sided like the edge of a palm.
 # The far end stays long whatever the hand size: on screen the arm has to
 # leave the frame, otherwise it looks like a cut-off tube floating in air.
-_ARM = (
-    (-46.0, 0.00, 3.60, 2.70, 2.00),
-    (-30.0, 0.00, 3.40, 2.60, 2.00),
-    (-16.0, 0.00, 3.40, 2.30, 2.05),
-    (-9.0, 0.00, 3.60, 1.90, 2.15),
-    (-4.5, 0.00, 3.87, 1.55, 2.35),
-    (-1.8, 0.00, 3.90, 1.40, 2.55),      # wrist
-    (0.8, -0.35, 3.20, 1.36, 2.80),
-    (3.2, -0.70, 4.10, 1.48, 3.00),
-    (5.8, -0.10, 4.55, 1.46, 3.10),
-    (8.2, 1.00, 4.30, 1.32, 3.05),      # knuckle line: span -3.3 .. 5.3
-    (9.2, 1.00, 3.90, 0.95, 2.80),
-    (10.0, 1.00, 0.60, 0.55, 2.20),     # closed cap, ~0.8 cm shorter
-)
-_ARM_PIN = 2         # first stations keep their y (they are the out-of-frame arm)
-_THENAR = 0.50       # thumb-side bulge, over the palm only (D2: 0.34 -> 0.50,
-                     # thenar sits lower at y~=2..5, clear of the knuckles)
-_HYPO = 0.12         # pinky-side bulge
+_ARM = tuple(_HS.ARM_PROFILE)
+_ARM_PIN = _HS.ARM_PIN     # first stations keep their y (out-of-frame arm)
+_THENAR = _HS.THENAR       # thumb-side bulge, over the palm only
+_HYPO = _HS.HYPO           # pinky-side bulge
 _ARM_M = 26          # points around an arm section
 
 _FING_M = 14         # points around a finger section
@@ -183,8 +163,8 @@ _FING_TIP_FLAT = 0.80  # H2: flatter still over the distal segment (per-station
                        # flat array in _geom; global _FING_FLAT stays 0.88)
 _FING_BELLY = 0.85   # extra z scale on the pad side (sin < 0)
 # H2: visual finger widths (IK uses lens, so reach is untouched): fingers
-# 2..4 x1.10 and the pinky x1.05 so neighbours touch (P5 guardrail: <= x1.15).
-_FING_R_SCALE = {1: 1.0, 2: 1.10, 3: 1.10, 4: 1.10, 5: 1.05}
+# 2..4 x1.10 and the pinky x1.08 so neighbours touch (P5 guardrail: <= x1.15).
+_FING_R_SCALE = dict(_HS.FING_R_SCALE)
 _FING_TIP_TAPER = 0.92  # H2: distal segment 8% slimmer than before
 # D5: resting fingers curl instead of hovering flat (robot look).
 _REST_LIFT = {1: 0.4, 2: 0.9, 3: 1.1, 4: 1.0, 5: 0.8}  # hover height per finger
@@ -222,6 +202,9 @@ _SHADOW_Z = 1.6              # fixed projection plane, just above black keys
 # H3: fingertip contact AO baked into the finger vertex colours (grounds the
 # fingertip where it meets the key; no actor, no depth involved).
 _PRESS_AO = 0.20             # max darkening of the pad-side tip at full press
+# R1.6: multiply-only press tint for the skinned mesh (scalars multiply
+# the texture, so the base is white and blush only darkens/warms the tip).
+_SKIN_PRESS_MUL = (1.00, 0.88, 0.90)
 # joint rings shade this much darker/pinker than mid-bone (vertex colours).
 _JOINT_SHADE = (0.93, 0.895, 0.905)
 _JOINT_WIDTH = 0.18       # gaussian width (local t) of the joint shading
@@ -229,9 +212,9 @@ _JOINT_WIDTH = 0.18       # gaussian width (local t) of the joint shading
 # frame (radii x hf, set in _build; centre y follows the thumb MCP in
 # __init__ because D1b moves it forward with hand size).  Tuned so it just
 # bridges palm edge -> thumb tube without doming out of the silhouette.
-_WEB_RADII = (1.20, 2.40, 1.10)
-_WEB_POS_X = -3.90    # midpoint of thumb (-5.6) and index (-2.1) MCP x
-_WEB_POS_Z = 0.70
+_WEB_RADII = tuple(_HS.WEB_RADII)
+_WEB_POS_X = _HS.WEB_POS_X    # midpoint of thumb and index MCP x
+_WEB_POS_Z = _HS.WEB_POS_Z
 
 _UP = np.array([0.0, 0.0, 1.0])
 
@@ -572,7 +555,9 @@ class HandRig:
     PITCH = math.radians(-5.0)
     ROLL = math.radians(5.0)  # sign follows the hand side
     BEND_MAX = 1.75
-    COUPLING = 0.4
+    COUPLING = 0.65   # R5.4: DIP = 0.65 x PIP like a real finger (0.4 -> 0.65;
+                      # reach remeasured: 70/70 green, worst bend 1.20 -> 1.06)
+    SMOOTH_TAU = 0.05    # R1.8: idle-finger x glide time constant [s]
 
     def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,
                  mesh="skinned", texture_path=None):
@@ -584,10 +569,6 @@ class HandRig:
                           if str(mesh).lower() in ("tubes", "skinned")
                           else "tubes")
         self.texture_path = texture_path
-        self.side = "left" if str(side).lower().startswith("l") else "right"
-        self.s = 1.0 if self.side == "right" else -1.0
-        self.hf = float(handSizeFactor(size))
-        self.skin = tuple(skin)
         # D3: keyboard centre for the arm-yaw shoulder reference (the 88-key
         # span is fixed geometry, so callers need not pass it).
         self.kb_center = _KB_CENTER if kb_center is None else float(kb_center)
@@ -611,6 +592,8 @@ class HandRig:
         self._vx = 0.0
         self._t = 0.0               # D5: animation clock for the breathing
         self._targets_x = {}
+        self._sx = {}           # R1.8: smoothed fan x per finger (idle glide)
+        self._blob_world = False  # R1.7: blob projects skinned (world) verts
         self.tip_err = {}     # finger -> cm between true q[3] and its target
         self.max_bend = {}    # finger -> PIP bend angle b1 [rad] of last solve
         self._col = {}
@@ -775,13 +758,16 @@ class HandRig:
             mesh.dataset.GetPointData().SetTCoords(tc)
         except Exception:
             pass
-        tpath = self.texture_path or _default_tex()
+        tpath = self.texture_path or _default_tex(self.hf, self.side)
         try:
             import os as _os
             if not _os.path.isfile(tpath):
                 build_skin_texture(rest, bones, tpath, names=names,
-                                   hf=self.hf)
+                                   hf=self.hf, side=self.side)
             mesh.texture(tpath)
+            # R1.5: the texture background already carries the skin tone, so
+            # the actor colour must be white -- SKIN x SKIN would square it.
+            mesh.color((1.0, 1.0, 1.0))
         except Exception:
             pass
         _material(mesh, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
@@ -810,6 +796,37 @@ class HandRig:
                           Rb=np.empty((B, 3, 3), np.float32),
                           Pb=np.empty((B, 3), np.float32),
                           rigid_mask=rigid_mask)
+        # R1.6 vertex-blush prep, from the bone weights: dominant finger +
+        # distalness (weight on that finger's f?_2 bone).  The RGB scalars
+        # start white (texture shows through: scalars multiply the texture);
+        # a pressed finger blushes only its tip via _tint_skin().
+        try:
+            N = rest32.shape[0]
+            aff = np.zeros((N, 5), np.float32)
+            dst = np.zeros((N, 5), np.float32)
+            for k, f in enumerate(FINGERS):
+                b0, b1, b2 = [names.index("f%d_%d" % (f, i))
+                              for i in range(3)]
+                for b in (b0, b1, b2):
+                    m = idx == b
+                    aff[:, k] += (w * m).sum(axis=1)
+                m2 = idx == b2
+                dst[:, k] = (w * m2).sum(axis=1)
+            dom = np.argmax(aff, axis=1).astype(np.int8)
+            dist = dst[np.arange(N), dom].astype(np.float32)
+            self._skin["dom"] = dom
+            self._skin["dist"] = np.clip(dist, 0.0, 1.0)
+            rgb = np.full((N, 3), 255, np.uint8)
+            arr = numpy_to_vtk(rgb, deep=0)
+            arr.SetName("RGB")
+            mesh.dataset.GetPointData().SetScalars(arr)
+            mesh.mapper.SetColorModeToDirectScalars()
+            mesh.color((1.0, 1.0, 1.0))
+            self._skin["blush"] = rgb
+            self._skin["blush_arr"] = arr
+            self._skin["blush_col"] = {}
+        except Exception:
+            pass
         # seed the skin chains (world) from the rest pose so a partial fan
         # update can never KeyError before reset() solves every finger.
         from pianoplayer.handmesh import rest_bones as _rb
@@ -834,6 +851,24 @@ class HandRig:
             self.web.actor.SetVisibility(0)
             for f in FINGERS:
                 self._geom[f]["mesh"].actor.SetVisibility(0)
+        except Exception:
+            pass
+        # R1.7: the blob projects the skinned (world-coordinate) mesh, with
+        # finger shapes.  The tube-arm blob is retired (its dataset is hidden).
+        try:
+            if self._arm_blob is not None:
+                _old, _mat = self._arm_blob
+                try:
+                    _old.SetVisibility(0)
+                except Exception:
+                    pass
+                try:
+                    self._blob_actors.remove(_old)
+                except ValueError:
+                    pass
+                self._arm_blob = None
+            self._add_blob(mesh.dataset)
+            self._blob_world = True
         except Exception:
             pass
 
@@ -997,6 +1032,32 @@ class HandRig:
         self._col[f] = a
         self._paint(f, a)
 
+    def _tint_skin(self, f, a):
+        """R1.6: blush only the pressed fingertip of the skinned mesh."""
+        S = self._skin
+        if S is None or "blush" not in S:
+            return
+        prev = S["blush_col"].get(f)
+        if prev is not None and abs(prev - a) < 0.02:
+            return
+        S["blush_col"][f] = a
+        try:
+            w = _smoothstep(0.55, 1.0, S["dist"]) * float(min(max(a, 0.0),
+                                                              1.0))
+            m = (S["dom"] == (f - 1)) & (w > 0.0)
+            rgb = S["blush"]
+            rgb[m] = (np.clip(
+                1.0 - w[m, None] * (1.0 - np.asarray(_SKIN_PRESS_MUL,
+                                                    float)[None, :]),
+                0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+            # released verts back to white
+            m0 = (S["dom"] == (f - 1)) & (w == 0.0)
+            rgb[m0] = 255
+            S["blush_arr"].Modified()
+            S["mesh"].actor.Modified()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------- shadows
     def _add_blob(self, pd):
         """H3: black projector-decal actor sharing the arm dataset `pd`.
@@ -1035,6 +1096,24 @@ class HandRig:
         if not self._arm_blob:
             return
         actor, mat = self._arm_blob
+        if self._blob_world:
+            # R1.7: skinned verts are already in world coordinates, so the
+            # projection stands alone (no R premultiply).
+            mat.SetElement(0, 0, 1.0)
+            mat.SetElement(0, 1, 0.0)
+            mat.SetElement(0, 2, 0.0)
+            mat.SetElement(0, 3, _SHADOW_OFF[0])
+            mat.SetElement(1, 0, 0.0)
+            mat.SetElement(1, 1, 1.0)
+            mat.SetElement(1, 2, 0.0)
+            mat.SetElement(1, 3, _SHADOW_OFF[1])
+            mat.SetElement(2, 0, 0.0)
+            mat.SetElement(2, 1, 0.0)
+            mat.SetElement(2, 2, 0.0)
+            mat.SetElement(2, 3, _SHADOW_Z)
+            mat.Modified()
+            actor.Modified()
+            return
         r0, r1 = R[0], R[1]
         mat.SetElement(0, 0, r0[0])
         mat.SetElement(0, 1, r0[1])
@@ -1061,7 +1140,7 @@ class HandRig:
                 pass
 
     def update(self, dt, finger_x, press=None, advance_black=None,
-                 aim_finger=None, held=None):
+                 aim_finger=None, held=None, aim_fingers=None):
         """
         Re-pose the whole hand.
 
@@ -1078,11 +1157,21 @@ class HandRig:
             True when a note falling on a black key is about to be played:
             the hand then slides into the keyboard early enough to reach it.
             None means "decide from the pressed fingers only".
-        aim_finger : None | int
-            finger about to strike (its target note is within AIM_LEAD but
-            not yet pressed): it lowers early to `top + HOVER` while the
-            other idle fingers keep their per-finger REST_LIFT curl (D5).
-            None (e.g. in tests) means no finger is aiming.
+        aim_finger : None | int | set
+            finger(s) about to strike (their target notes are within
+            AIM_LEAD but not yet pressed): they lower early to `top +
+            HOVER` while the other idle fingers keep their per-finger
+            REST_LIFT curl (D5).  A set is accepted (see vkeyboard._pump);
+            a lone int keeps working.  None (e.g. in tests) means no
+            finger is aiming.  Held/aiming fingers track their key x
+            exactly (no idle lerp, no smoothing glide); idle fingers
+            glide toward the fan with SMOOTH_TAU (R1.8).
+        aim_fingers : None | int | set
+            R1.8 set form of `aim_finger`: fingers of all notes with
+            `t_on - now < AIM_LEAD` that are not yet fired. Unioned with
+            `aim_finger`, so old single-finger callers behave exactly as
+            before; a set of several aiming fingers keeps each of them
+            exactly on its key x (no lerp toward natural).
         held : None | set
             fingers currently holding a key (passed from `_frame` as
             `{f for f in FINGERS if p.active.get(f)}`): they keep exactly
@@ -1096,6 +1185,15 @@ class HandRig:
         press = press or {}
         self._t += dt
         held = set() if held is None else set(held)
+        # R1.8: accept the aim set (union with the legacy single finger).
+        aim_set = set()
+        for _aim in (aim_finger, aim_fingers):
+            if _aim is None:
+                continue
+            try:
+                aim_set |= set(_aim)
+            except TypeError:
+                aim_set.add(_aim)
 
         # ---- fingertip targets ----------------------------------------
         targets = {}
@@ -1113,9 +1211,21 @@ class HandRig:
             if x is None:
                 continue
             fan_xs[f] = float(x)
+            # R1.8: held/aiming fingers track the key x exactly (no glide,
+            # no idle lerp), so a press never teleports at the transition;
+            # idle fingers glide toward the fan (tau = SMOOTH_TAU).  The
+            # tracked x seeds the glide so a release resumes from the key.
+            if f in held or f in aim_set:
+                x = float(x)
+                self._sx[f] = x
+            else:
+                prev = self._sx.get(f, float(x))
+                k = 1.0 - math.exp(-dt / self.SMOOTH_TAU)
+                x = prev + (float(x) - prev) * k
+                self._sx[f] = x
             a = float(min(max(press.get(f, 0.0), 0.0), 1.0))
             rest = 1.0 - a
-            if f not in held and f != aim_finger and rest > 0.5:
+            if f not in held and f not in aim_set and rest > 0.5:
                 # H1.2/1.3: idle fingers head for their natural slots and
                 # the idle thumb splays outward like a real hand.
                 x = ((1.0 - _IDLE_NATURAL_LERP) * float(x)
@@ -1125,13 +1235,16 @@ class HandRig:
             black = key_is_black(x)
             name = FINGER_NAMES[f]
             y = CONTACT_Y_BLACK[name] if black else CONTACT_Y_WHITE[name]
+            if f == 1:
+                # D1c (thumb twin): short anatomical thumb, nearer contact
+                y -= _THUMB_CONTACT_DY
             if f == 5:
                 # D1c: pinky contact sits closer to the player (short finger)
                 y -= _PINKY_CONTACT_DY
             top = BLACK_TOP if black else WHITE_TOP
             pressed_z = top - key_drop(x, y, a) + self.KEY_SINK
             rs = self.hf / _REST_REF_HF
-            if f == aim_finger and rest > 0.0:
+            if f in aim_set and rest > 0.0:
                 # D5: the finger about to strike lowers early.
                 z = (top + self.HOVER) * rest + pressed_z * a
                 yy = y
@@ -1167,6 +1280,29 @@ class HandRig:
         chase = any(float(press.get(f, 0.0)) > 0.5
                     and float(self.tip_err.get(f, 0.0)) > _CHASE_ERR
                     for f in FINGERS)
+        # R5.1b: a stretched hold drags the root target toward its own key:
+        # the chord shortens instead of the fingertip detaching while the
+        # hand serves new notes.  The pull fades in linearly above a 0.3 cm
+        # deadband (an on/off switch limit-cycles against settle()'s 8
+        # steps); the 0.4 ceiling keeps the fan mean dominant.
+        pull = 0.0
+        sxx = syy = 0.0
+        for f in FINGERS:
+            if f not in targets:
+                continue
+            if float(press.get(f, 0.0)) > 0.5:
+                err = float(self.tip_err.get(f, 0.0))
+                if err > 0.3:
+                    w = min((err - 0.3) / 1.0, 1.0)
+                    pull = max(pull, 0.4 * w)
+                    sxx += targets[f][0]
+                    syy += targets[f][1]
+        if pull > 0.0:
+            n = sum(1 for f in FINGERS
+                    if f in targets and float(press.get(f, 0.0)) > 0.5
+                    and float(self.tip_err.get(f, 0.0)) > 0.3)
+            rx_t = (1.0 - pull) * rx_t + pull * sxx / max(n, 1)
+            ry_t = (1.0 - pull) * ry_t + pull * syy / max(n, 1)
         alpha = 1.0 - math.exp(-dt / (_CHASE_TAU if chase else self.TAU))
         prev_x = float(self.root[0])
         self.root[0] += (rx_t - self.root[0]) * alpha
@@ -1217,6 +1353,8 @@ class HandRig:
                 self._skin_q[f] = q.copy()
                 g["pts"][-1] = q[3]
                 g["pts"][-2] = q[0]
+                # R1.6: fingertip-only press blush on the skinned mesh.
+                self._tint_skin(f, a)
                 continue
             self._skin_finger(g, q)
             # H3: fingertip-only press blush (no nail mesh, no shadow disc).
@@ -1239,6 +1377,7 @@ class HandRig:
         self.yaw = 0.0
         self._vx = 0.0
         self._targets_x = {}
+        self._sx = {}
         for f in FINGERS:
             self._col.pop(f, None)
         self.update(1.0, self._neutral_x(), {})

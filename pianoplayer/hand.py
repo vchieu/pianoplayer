@@ -13,12 +13,29 @@ import pianoplayer.utils as utils
 HARD = 200.0            # cost added per violated skip/held rule (hard-soft: a
                         # violated rule never eliminates the path, fixing F4)
 WEAK_FINGER_PENALTY = 3.0   # B3: light penalty, see pair_cost()
-WEAK_FINGER_MAX_DT = 0.3    # B3: fires when the inter-onset gap is below this.
-                            # noteseq times are in quarter notes; 0.3 quarters
-                            # is ~0.15 s at the default 120 bpm.
+WEAK_FINGER_MAX_DT = 0.15   # B3/F1: seconds; fires when the inter-onset gap
+                            # in seconds is below this.
 WEAK_FINGER_MIN_JUMP = 3.0  # B3: ... and the finger itself travels more than
                             # this (cm).
 HELD_EPS = 1e-3             # B2: overlap slack in quarter notes.
+SEC_SMOOTH = 0.1            # F1: smoothing term added to dt, in seconds.
+REPEAT_PENALTY = 6.0        # F2: same finger + same key + dt < REPEAT_MAX_DT
+REPEAT_MAX_DT = 0.25        #   adds REPEAT_PENALTY*(MAX_DT-dt)/MAX_DT (s).
+SAME_FINGER_BASE = 2.0      # F3: soft cost of reusing one finger on different
+SAME_FINGER_DX = 0.15       #   keys: BASE + DX*|dx_cm| when dt >= MAX_DT.
+SAME_FINGER_MAX_DT = 0.25   # F3: faster reuse than this (s) is still HARD.
+FALLBACK_BPM = 120.0        # F1: quarters -> seconds when t_sec is missing
+                            # (hand-built INotes that never went through
+                            # reader()).
+
+
+def _dt_sec(na, nb):
+    """Inter-onset gap in seconds (F1), without the smoothing term."""
+    ta = getattr(na, "t_sec", None)
+    tb = getattr(nb, "t_sec", None)
+    if ta is None or tb is None:
+        return abs(nb.time - na.time) * 60.0 / FALLBACK_BPM
+    return abs(float(tb) - float(ta))
 
 
 def _set_fingering(n21, fng, replace=True):
@@ -134,8 +151,20 @@ class Hand:
             return 0.0
 
         # single notes, and every mixed pair: the old single-note rules.
-        if fa==fb and abs(xba)>1e-9 and na.duration<4:
-            return HARD # play different notes w/ same finger
+        # F3: same finger on different keys is no longer banned outright:
+        # only a still-held note (B2) or a too-fast reuse (dt in seconds)
+        # is HARD; otherwise a soft cost growing with the leap distance.
+        # The boundary is inclusive (dt <= 0.25 s is HARD): eighth notes at
+        # 120 bpm sit exactly at 0.25 s, and letting one finger slide
+        # across scale steps there collapses every black-key scale into
+        # 1,1,1.../3,3,3... reuse (the thumb-tuck velocity is overpriced
+        # until F5 models crossing properly). Revisit in F5.
+        if fa==fb and abs(xba)>1e-9:
+            if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
+                return HARD  # finger still holding na: cannot replay (B2)
+            if _dt_sec(na, nb) <= SAME_FINGER_MAX_DT:
+                return HARD  # too fast to lift and re-place the finger
+            return SAME_FINGER_BASE + SAME_FINGER_DX * abs(xba)
         if fa>1 : # if a is not thumb
             if fb>1 and (fb-fa)*xba<0: return HARD # non-thumb fingers are crossings
             if fb==1 and nb.isBlack and xba>0: return HARD # crossing thumb goes to black
@@ -157,8 +186,17 @@ class Hand:
         """
         if fa not in (1,2,3,4,5) or fb not in (1,2,3,4,5):
             return HARD  # e.g. a legacy finger 0: always losable, never fatal
-        reach_err = abs(nb.x - (na.x + self.frest[fb] - self.frest[fa]))
-        dt = abs(nb.time - na.time) +0.1 # available time +smoothing term 0.1s
+        same_key = abs(nb.x - na.x) < 1e-9
+        if same_key:
+            # F2: alternating fingers on a repeated key costs no travel:
+            # the hand barely moves, so every finger starts from reach 0
+            # and only the same-finger repetition penalty below tells
+            # a fast repeat (3-2-1) apart from a comfortable one.
+            reach_err = 0.0
+        else:
+            reach_err = abs(nb.x - (na.x + self.frest[fb] - self.frest[fa]))
+        dt_gap = _dt_sec(na, nb)
+        dt = dt_gap + SEC_SMOOTH  # available time (s) + smoothing term
         v  = reach_err/dt                # velocity
         if nb.isBlack:                   # penalty (by increasing speed)
             v /= self.weights[fb] * self.bfactor[fb]
@@ -170,9 +208,15 @@ class Hand:
         if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
             if fa==fb and abs(nb.x - na.x)>1e-9:
                 cost += HARD
+        # F2: hammering one key with one finger gets tiring fast: penalise
+        # same-finger repeats below REPEAT_MAX_DT, linearly up to
+        # REPEAT_PENALTY for a zero gap. Slow repeats (dt >= 0.25 s) are
+        # free, so the solver may keep the finger there.
+        if fa==fb and same_key and dt_gap < REPEAT_MAX_DT:
+            cost += REPEAT_PENALTY * (REPEAT_MAX_DT - dt_gap) / REPEAT_MAX_DT
         # B3: weak fingers (4, 5) must not jump far on short notice.
         # (No extra thumb-on-black penalty: bfactor already covers it.)
-        if fb in (4,5) and abs(nb.time - na.time) < WEAK_FINGER_MAX_DT \
+        if fb in (4,5) and dt_gap < WEAK_FINGER_MAX_DT \
                 and reach_err > WEAK_FINGER_MIN_JUMP:
             cost += WEAK_FINGER_PENALTY
         return cost

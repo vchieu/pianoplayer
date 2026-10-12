@@ -1,0 +1,21 @@
+{
+  "_note": "Real-hand measurements in cm (size M ≈ hf 0.82). DEFAULTS are sane synthetic values per PIANOPLAYER_HUMAN_HAND_PLAN.md R0.2 reference ranges — replace with your own ruler measurements (see R0.1) and re-run diag_hand_anatomy.py.",
+  "hand_length_wrist_to_middle_tip": 18.2,
+  "palm_width_mcp": 8.4,
+  "wrist_width": 6.1,
+  "finger_length_base_to_tip": {"thumb": 6.0, "index": 7.9, "middle": 8.6, "ring": 7.9, "little": 6.4},
+  "finger_width_pip": {"thumb": 1.9, "index": 1.7, "middle": 1.75, "ring": 1.65, "little": 1.45},
+  "thumb_mcp_to_tip": 6.1,
+  "thumb_abduction_deg": 25.0,
+  "reference_ranges": {
+    "palm_width_over_hand_length": [0.42, 0.50],
+    "wrist_over_palm": [0.68, 0.80],
+    "thumb_over_index": [0.65, 0.80],
+    "index_over_middle": [0.90, 0.95],
+    "ring_over_middle": [0.92, 0.97],
+    "little_over_middle": [0.72, 0.80],
+    "pip_diam_over_mcp_spacing": [0.85, 1.0],
+    "gap50_proximal_cm": [0.0, 0.15],
+    "dip_over_pip": [0.60, 0.75]
+  }
+}

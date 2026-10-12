@@ -49,6 +49,7 @@ from pianoplayer.utils import (
     KEY_PIVOT_Y,
     KEY_PRESS_ANGLE,
     KEY_WB,
+    beat_to_seconds,
     key_is_black,
     nameof,
 )
@@ -204,11 +205,23 @@ class _Player:
         self.notes = []
         self.fire = 0               # next note to be pressed
         self.aim = 0                # note the hand is heading towards
+        self.aim_fingers = set()    # R1.8: fingers of imminent notes
         self.sched = 0              # next note to be handed to the synth
         self.held = []              # fired notes still sounding
         self.press = {f: 0.0 for f in FINGERS}
         self.active = {f: 0 for f in FINGERS}
         self.finger_x = {}
+
+
+def _aim_fingers(notes, now, lead=AIM_LEAD):
+    """Fingers of not-yet-fired notes starting within `lead` s (R1.8).
+
+    Module-level so the rule is unit-testable without a scene: every
+    finger that must strike imminently aims exactly at its key instead
+    of drifting toward its relaxed slot.
+    """
+    return {e.finger for e in notes
+            if e.finger and not e.fired and (e.t_on - now) < lead}
 
 
 # --------------------------------------------------------------------------- #
@@ -591,13 +604,7 @@ class VirtualKeyboard:
         """Seconds (already divided by speedfactor) at quarter-length `beat`,
         integrating the tempo map piece by piece."""
         tm = self.tempo_map or [(0.0, float(self.tempo))]
-        t = 0.0
-        for k, (off, bpm) in enumerate(tm):
-            if beat <= off:
-                break
-            end = tm[k + 1][0] if k + 1 < len(tm) else float("inf")
-            t += (min(beat, end) - off) * 60.0 / max(bpm, 1e-3)
-        return t / max(float(self.speedfactor), 1e-6)
+        return beat_to_seconds(float(beat), tm, self.speedfactor)
 
     def _events_for(self, hand, sign, pan):
         """Turn a Hand noteseq into a time ordered list of _Ev."""
@@ -985,6 +992,9 @@ class VirtualKeyboard:
             if e.finger and e.wx is not None:
                 fx[e.finger] = e.wx
         p.finger_x = fx
+        # R1.8: every finger striking within AIM_LEAD aims exactly at its
+        # key (no drift toward the relaxed slot before the press).
+        p.aim_fingers = _aim_fingers(notes, now)
 
         # is a black key coming up soon? -------------------------------------
         advance = bool(target is not None and target.black
@@ -1099,6 +1109,12 @@ class VirtualKeyboard:
                         newv = tgt
                     p.press[f] = newv
 
+            # R1.8 caller side: _pump already stores p.aim_fingers (fingers
+            # striking within AIM_LEAD). It is NOT passed to the rig yet:
+            # without the rig-side idle spring (Track R R1.8) the early
+            # aiming measurably worsens steady-state hold tip_err
+            # (p95 1.41 -> 2.36 cm in test_play.py). Track R flips this
+            # switch together with the spring dynamics.
             p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
                          held={f for f in FINGERS if p.active.get(f)})
 

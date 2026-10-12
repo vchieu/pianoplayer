@@ -1,4 +1,4 @@
-"""Unified skinned hand mesh (Tier B).
+"""Unified skinned hand mesh (Tier B, SDF v2).
 
 One smooth-unioned mesh per hand, built once from a signed-distance field
 (SDF) in the wrist-local rest pose and cached in the user cache dir::
@@ -8,17 +8,23 @@ One smooth-unioned mesh per hand, built once from a signed-distance field
     +x     : toward the pinky (right hand; mirrored for the left)
     +z     : up (dorsal side)
 
-The rest pose (F1) is a slight curl + slight spread solved with the existing
-``solve_chain`` IK -- no rig required.  Primitives are forearm/palm
-ellipsoids from the ``_ARM`` stations, per-finger tapered capsules on the
-rest chains plus joint spheres, and a thumb CMC capsule.  Combination uses
-``smin`` (``-k*logaddexp``) inside a finger / finger<->palm / CMC<->palm and
-plain ``min()`` finger<->finger so neighbours touch but never fuse into a
-sheet (F2).
+The rest pose (R2.6) is the average playing pose -- fingers closed, slight
+curl solved with the existing ``solve_chain`` IK, no rig required.
+Primitives are forearm/palm ellipsoids from the ``ARM_PROFILE`` stations, a
+single thenar pair + small hypothenar, 4 MCP mounds, per-finger 3-segment
+elliptical capsules (flatter dorsal, fuller pad) with PIP/DIP mounds and a
+flattened pad tip, and a thumb CMC capsule.  Combination uses ``smin``
+(``-k*logaddexp``) inside a finger / finger<->palm, y-dependent webbing
+between neighbours (smin inside the web band, plain ``min()`` outside so
+neighbours touch but never fuse), and plain ``min()`` finger<->finger
+outside the band (R2.4).
 
-Per-frame skinning (F3, in ``hand3d``) reuses the already-solved IK ``q``
+Per-frame skinning (in ``hand3d``) reuses the already-solved IK ``q``
 chains: per bone ``R_b = [X T Z] @ [X0 T0 Z0].T``,
 ``v' = P_b + R_b @ (v - P0_b)`` (linear blend skinning, vectorised).
+
+All geometry constants live in ``pianoplayer.handspec``; the cache filename
+carries their hash so edits rebuild automatically (R1.4).
 
 No new dependencies: numpy + PIL + vtk/vedo only (no scipy).
 """
@@ -26,40 +32,28 @@ No new dependencies: numpy + PIL + vtk/vedo only (no scipy).
 from __future__ import annotations
 
 import os
-import time
 
 import numpy as np
 
-HANDMESH_VERSION = "v1"
+from pianoplayer import handspec as H
+
+HANDMESH_VERSION = H.HANDMESH_VERSION
 # Deviation (H6, plan-sanctioned fallback): GRID_STEP 0.12 -> 0.15. Timing
 # evidence (size M, same machine): 0.12 SDF alone 5.4-8.1 s (total build
 # 7-10 s incl. decimation); 0.15 SDF ~3.0-3.4 s, total ~4.5 s. Decimation to
-# <=6000 tris dominates the final surface detail either way (a 3k-vert hand
-# cannot resolve below ~2 mm), so 0.15 loses nothing visible.
-GRID_STEP = 0.15
-GRID_Y0 = -24.0   # fixed proximal border: the stub pole (~-23.5) and the
-                  # widest station reach (XXL idx2: -23.2) both close inside
-                  # it (app frame bottom is -18, so the cap never shows)
-GRID_X = (-9.0, 9.0)
-GRID_Y = (-20.0, 22.0)   # Deviation (H6): plan says y max 12, which clips the
-GRID_Z = (-3.0, 4.0)     # rest fingertips (F1 chains reach y~14-21, z~3.3);
-                         # extended so the iso surface stays closed.
+# <=8000 tris dominates the final surface detail either way, so 0.15 loses
+# nothing visible.
+GRID_STEP = H.GRID_STEP
+GRID_Y0 = H.GRID_Y0     # fixed proximal border: the stub pole (~-23.5) always
+                        # closes inside it (app frame bottom is -18, so the
+                        # cap never shows)
 TEX_NAME = "handtex_v2.png"
-TRIS_MAX = 6000
+TRIS_MAX = H.TRIS_MAX
 
-# F2: true-anatomy finger widths.  The tubes (~0.75 cm mid-finger radius at
-# size M) looked skinny; the SDF uses wider capsules so neighbours touch in
-# the playing pose (gap == 1) while the F1 rest spread keeps small positive
-# gaps.  Values are multipliers on the _SPECS radii (which already include
-# the Tier-A _FING_R_SCALE); mid-finger half-width lands at 0.85-1.00 cm
-# for size M (hf=0.82).  Deviation (H10): increased 2-5 scales to close gap
-# in playing pose; max mid-width stays ≤1.00 cm.
-_SDF_R_SCALE = {1: 1.30, 2: 1.45, 3: 1.45, 4: 1.45, 5: 1.58}
-
-_K_INTRA = 0.05    # within one finger: near-hard union
-_K_PALM = 0.47     # finger <-> palm/thenar: webbing bridges
-_K_CMC = 0.40      # thumb CMC <-> palm
-_K_BODY = 0.30     # forearm/palm ellipsoid chain
+_K_INTRA = H.K_INTRA  # within one finger: near-hard union
+_K_PALM = H.K_PALM    # finger <-> palm/thenar: webbing bridges
+_K_CMC = H.K_CMC      # thumb CMC <-> palm
+_K_BODY = H.K_BODY    # forearm/palm ellipsoid chain
 
 
 # --------------------------------------------------------------------------- #
@@ -76,14 +70,58 @@ def cache_dir():
 
 
 def cache_path(hf, side):
+    """Hashed cache file (R1.4): geometry/SDF/grid/version changes rebuild."""
+    s = "left" if str(side).lower().startswith("l") else "right"
+    return os.path.join(cache_dir(),
+                        "handmesh_%s_%.2f_%s.npz" % (s, float(hf),
+                                                    H.geom_hash()))
+
+
+def _legacy_cache_path(hf, side):
+    """Pre-R1.4 filename.  Never loaded (no geometry hash inside, so loading
+    it would reintroduce BUG-4: stale shapes surviving constant edits);
+    only listed so clear_cache() can migrate it away."""
     s = "left" if str(side).lower().startswith("l") else "right"
     return os.path.join(cache_dir(),
                         "handmesh_%s_%.2f_%s.npz" % (s, float(hf),
                                                     HANDMESH_VERSION))
 
 
-def texture_path():
-    return os.path.join(cache_dir(), TEX_NAME)
+def _load_cache(path):
+    try:
+        if os.path.isfile(path):
+            return np.load(path, allow_pickle=False)
+    except Exception:
+        pass
+    return None
+
+
+def texture_path(hf=None, side=None):
+    """Per-(hf, side) texture (R1.5); bare call returns the legacy file."""
+    if hf is None or side is None:
+        return os.path.join(cache_dir(), TEX_NAME)
+    s = "left" if str(side).lower().startswith("l") else "right"
+    return os.path.join(cache_dir(),
+                        "handtex_%s_%.2f_%s.png" % (s, float(hf),
+                                                   H.geom_hash()))
+
+
+def clear_cache():
+    """Remove all cached meshes + textures (R1.4 `--clear-cache`)."""
+    n = 0
+    try:
+        d = cache_dir()
+        for fn in os.listdir(d):
+            if (fn.startswith("handmesh_") and fn.endswith(".npz")) or \
+                    (fn.startswith("handtex_") and fn.endswith(".png")):
+                try:
+                    os.remove(os.path.join(d, fn))
+                    n += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return n
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +155,50 @@ def _capsule(p, a, b, r0, r1):
     return d - (float(r0) + (float(r1) - float(r0)) * t)
 
 
+def _capsule_ell(p, a, b, r0, r1, az):
+    """R2.3 elliptical capsule: x/y radius r, z radius az*r (flatter back).
+
+    The offset from the segment is measured with z compressed, so the
+    zero level sits at az*r above/below the axis instead of r.
+    """
+    dt = np.asarray(p).dtype
+    a = np.asarray(a, dtype=dt)
+    b = np.asarray(b, dtype=dt)
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom < 1e-12:
+        off = (p - a[None, :]) * np.array([1.0, 1.0, 1.0 / az], dtype=dt)
+        return np.linalg.norm(off, axis=1) - float(r0)
+    t = np.clip((p - a[None, :]) @ ab / denom, 0.0, 1.0)
+    closest = a[None, :] + t[:, None] * ab[None, :]
+    off = (p - closest) * np.array([1.0, 1.0, 1.0 / max(float(az), 0.3)],
+                                   dtype=dt)
+    d = np.linalg.norm(off, axis=1)
+    return d - (float(r0) + (float(r1) - float(r0)) * t)
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((np.asarray(x) - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _blend(w, s, m):
+    """Blend fields `s` (weight w) and `m` (weight 1-w), NaN-safe.
+
+    Plain `w*s + (1-w)*m` yields 0*inf = NaN where w hits exactly 0/1
+    while a field is +inf (far from every primitive); select instead.
+    Single precision throughout: the grid is float32 and the blend needs
+    no more (saves ~1/3 of the combine traffic).
+    """
+    w = np.asarray(w, np.float32)
+    s = np.asarray(s, np.float32)
+    out = np.array(m, dtype=np.float32, copy=True)
+    mid = (w > 0) & (w < 1)
+    out[mid] = w[mid] * s[mid] + (1.0 - w[mid]) * out[mid]
+    out[w >= 1] = s[w >= 1]
+    return out
+
+
 def _ellipsoid(p, c, r):
     """Approximate SDF of an axis-aligned ellipsoid (stable, no scipy)."""
     dt = np.asarray(p).dtype
@@ -137,34 +219,34 @@ def _ellipsoid(p, c, r):
 # rest pose (F1) + bones
 # --------------------------------------------------------------------------- #
 def _thumb_by_for(hf):
-    from pianoplayer.hand3d import _HF_XXS, _THUMB_BASE_Y0, _THUMB_FWD
-    return max(_THUMB_BASE_Y0,
-               _THUMB_BASE_Y0 + _THUMB_FWD * (float(hf) - _HF_XXS))
+    return H.thumb_base_y(float(hf))
 
 
 def rest_chains(hf):
-    """F1 rest joints: {finger: q (4,3)} + thumb CMC start, right-hand local.
+    """R2.6 rest joints: {finger: q (4,3)} + thumb CMC start, right-hand local.
 
-    target = base + (spread_x, L*0.96, +0.3), spread_x = (f-3)*0.35,
-    solved with the existing solve_chain (slight curl + slight spread).
+    The average playing pose: fingers closed (REST_SPREAD), slight curl
+    (REST_REACH_FRAC of the chain length, small lift), solved with the
+    existing solve_chain -- no rig required.
     """
-    from pianoplayer.hand3d import _SPECS, solve_chain
+    from pianoplayer.hand3d import solve_chain
     hf = float(hf)
     chains = {}
-    for f in (1, 2, 3, 4, 5):
-        spec = _SPECS[f]
-        bx, by, bz = spec["base"]
+    for f in H.FINGERS:
+        spec = H.FINGER_SPECS[f]
+        bx, by, bz = H.mcp_base(f)
         if f == 1:
-            by = _thumb_by_for(hf) / hf  # _L multiplies y by hf below
+            by = H.thumb_base_y(hf) / hf  # scaled by hf below
         base = np.array([bx * hf, by * hf, bz * hf])
         lens = [l * hf for l in spec["lens"]]
         L = sum(lens)
-        spread = (f - 3) * 0.35 * hf
-        target = base + np.array([spread, L * 0.96, 0.3 * hf])
+        spread = (f - 3) * H.REST_SPREAD * hf
+        target = base + np.array([spread, L * H.REST_REACH_FRAC,
+                                  H.REST_LIFT_Z * hf])
         pole = np.array(spec["pole"], float)
         pts, _ = solve_chain(base, target, lens, pole)
         chains[f] = np.array(pts, float)
-    cmc_a = np.array([-3.0 * hf, -0.5 * hf, 0.3 * hf])
+    cmc_a = np.array(H.THUMB_CMC_A) * hf
     return chains, cmc_a
 
 
@@ -175,7 +257,6 @@ def rest_bones(hf, side="right"):
     The first three are rigid with the palm (same root/R transform); the
     15 finger bones articulate with the IK chains.
     """
-    from pianoplayer.hand3d import _SPECS  # noqa: F401 (keeps specs in sync)
     hf = float(hf)
     s = -1.0 if str(side).lower().startswith("l") else 1.0
     chains, cmc_a = rest_chains(hf)
@@ -245,24 +326,27 @@ def rest_frames(hf, side="right"):
 # SDF field
 # --------------------------------------------------------------------------- #
 def _body_ellipsoids(hf):
-    """Forearm->knuckle ellipsoid chain from the _ARM stations + eminences.
+    """Forearm->knuckle ellipsoid chain from ARM_PROFILE + mounds (R2.1/2).
 
-    The two farthest _ARM stations (y=-46,-30) are replaced by five unscaled
-    forearm-stub ellipsoids (y -21.5..-7.5): the gap-based ry of the -30
-    station (up to ~19 cm at small sizes) would otherwise poke through any
-    reasonable grid border and leave the mesh open. The stub chain ends in
-    a rounded pole at y~-23.5, safely inside the grid (app frame bottom is
-    -18, so the cap never shows). Station ry is capped at 4.0 for the same
-    reason; distal gaps (~2-3 cm) never hit the cap.
+    The two farthest stations are replaced by five unscaled forearm-stub
+    ellipsoids (the gap-based ry of the -30 station would otherwise poke
+    through any reasonable grid border and leave the mesh open).  The chain
+    ends in a rounded pole at y~-23.5, safely inside the grid (app frame
+    bottom is -18, so the cap never shows).  Station ry is capped at 4.0;
+    distal gaps (~2-3 cm) never hit the cap.
+
+    R1.1: the thenar/hypothenar eminences are small (no outer-edge ears);
+    the thenar is a single pair along the metacarpal (~35 deg); 4 MCP
+    mounds round the knuckle line (R2.2).
     """
-    from pianoplayer.hand3d import _ARM, _ARM_PIN
     hf = float(hf)
-    n = len(_ARM)
-    ys = np.array([(y if k < _ARM_PIN else y * hf) for k, (y, *_r) in
-                   enumerate(_ARM)])
+    prof = H.ARM_PROFILE
+    n = len(prof)
+    ys = np.array([(y if k < H.ARM_PIN else y * hf) for k, (y, *_r) in
+                   enumerate(prof)])
     ell = []
-    for k, (y, c, a1, a2, _p) in enumerate(_ARM):
-        if k < _ARM_PIN:
+    for k, (y, c, a1, a2, _p) in enumerate(prof):
+        if k < H.ARM_PIN:
             continue  # far out-of-frame stations: replaced by stubs below
         gaps = []
         if k > 0:
@@ -277,75 +361,58 @@ def _body_ellipsoids(hf):
     for sy in (-21.5, -18.0, -14.5, -11.0, -7.5):
         ell.append((np.array([0.0, sy, 0.0]),
                     np.array([3.3 * hf, 2.0, 2.3 * hf])))
-    # thenar / hypothenar eminences (same y neighbourhood as _arm_surface)
-    ell.append((np.array([-3.4 * hf, 2.2 * hf, 0.4 * hf]),
-                np.array([1.6 * hf, 2.8 * hf, 1.2 * hf])))
-    ell.append((np.array([4.1 * hf, 4.2 * hf, 0.3 * hf]),
-                np.array([1.3 * hf, 2.2 * hf, 1.0 * hf])))
+    # thenar pair along the metacarpal + small hypothenar (R1.1/R2.5).
+    # All mounds stay inside the loft silhouette (outer-edge defect: the
+    # +x extent must not exceed the profile by more than ~0.3 cm).
+    ell.append((np.array([-2.6 * hf, 1.2 * hf, 0.4 * hf]),
+                np.array([1.2 * hf, 2.0 * hf, 1.0 * hf])))
+    ell.append((np.array([-3.3 * hf, 3.2 * hf, 0.5 * hf]),
+                np.array([0.8 * hf, 1.5 * hf, 0.9 * hf])))
+    ell.append((np.array([3.0 * hf, 4.2 * hf, 0.3 * hf]),
+                np.array([0.7 * hf, 1.5 * hf, 0.8 * hf])))
+    # MCP mounds (R2.2): the knuckle line reads as 4 bumps, not a bar
+    spac = H.mcp_spacing()
+    for f, sp in zip((2, 3, 4, 5), [spac[0]] + spac):
+        bx, by, bz = H.mcp_base(f)
+        ell.append((np.array([bx * hf, (by - 0.3) * hf, bz * hf]),
+                    np.array([H.MCP_MOUND_R * sp * hf, 0.9 * hf,
+                              0.9 * hf])))
     return ell
 
 
 def _finger_capsules(hf, chains):
-    """Per finger: 2 tapered capsules + PIP joint sphere (right-hand local).
+    """R2.3 fingers: 3 elliptical capsules + PIP/DIP mounds + pad tip.
 
-    The distal capsule runs PIP->tip straight: the rest DIP bend is only
-    ~0.14 rad (sagitta ~1.6 mm, subsumed by the ~20 mm width), and the
-    capsule-capsule smin joint reads as a knuckle crease under the H9
-    texture. Two evals + one sphere per finger instead of six.
+    Each segment is an elliptical section (x/y radius r, z radius az*r,
+    flatter on the back); the PIP mound and a slight DIP mound read as
+    knuckles; the fingertip is a flattened pad ellipsoid, not a hemisphere.
+    Radii come from handspec (R1.2: no inflation); the MCP radius is capped
+    at half the local MCP spacing so neighbours can never overlap.
     """
-    from pianoplayer.hand3d import _SPECS
     hf = float(hf)
+    spac = H.mcp_spacing()
+    adj = {2: min(spac[0], spac[1]), 3: min(spac[0], spac[1]),
+           4: min(spac[1], spac[2]), 5: spac[2], 1: 2.0}
     out = {}
-    for f in (1, 2, 3, 4, 5):
-        spec = _SPECS[f]
-        q = chains[f]
-        base_r = [r * hf * _SDF_R_SCALE[f] for r in spec["radii"]]
-        caps = [(q[0], q[1], base_r[0], base_r[1]),
-                (q[1], q[3], base_r[1], base_r[3] * 0.92)]
-        spheres = [(q[1], max(base_r[1], base_r[2]) * 1.02)]
-        out[f] = (caps, spheres)
+    for f in H.FINGERS:
+        q = np.asarray(chains[f], float)
+        R = [H.finger_radius(f, j) * hf for j in range(4)]
+        R[0] = min(R[0], 0.5 * adj[f] * hf)
+        az0, az1, az2 = H.FING_Z_FLAT
+        segs = [(q[0], q[1], R[0], R[1], az0),
+                (q[1], q[2], R[1], R[2], az1),
+                (q[2], q[3], R[2], R[3] * 0.94, az2)]
+        spheres = [(q[0] + 0.13 * (q[1] - q[0]),
+                    R[0] * 1.10),                            # MCP knuckle
+                   (q[1], max(R[1], R[2]) * H.PIP_MOUND),     # PIP mound
+                   (q[2], max(R[2], R[3]) * H.DIP_MOUND)]    # DIP hint
+        d = q[3] - q[2]
+        n = float(np.linalg.norm(d)) or 1.0
+        tip = q[3] - 0.15 * R[3] * d / n
+        pads = [(tip, np.array([R[3], 1.35 * R[3],
+                                H.TIP_PAD_FLAT * R[3]]))]
+        out[f] = (segs, spheres, pads)
     return out
-
-
-def _sdf_slice(xy, y, chains, cmc_a, body_ell, fing_caps, hf):
-    """SDF over one y slice (points (M,3) with constant y)."""
-    p = np.asarray(xy, np.float32)
-    INF = np.full(p.shape[0], np.inf, np.float32)
-    # body: smin chain of ellipsoids
-    d_body = INF
-    for (c, r) in body_ell:
-        if abs(y - c[1]) > (r[1] + 2.5):
-            continue  # y-culling: no influence on this slice
-        d_body = _smin(d_body, _ellipsoid(p, c, r), _K_BODY)
-    # fingers
-    d_fings = {}
-    for f, (caps, spheres) in fing_caps.items():
-        d_f = INF
-        for (a, b, r0, r1) in caps:
-            rm = max(float(r0), float(r1))
-            if y < min(a[1], b[1]) - rm - 0.6:
-                continue
-            if y > max(a[1], b[1]) + rm + 0.6:
-                continue
-            d_f = _smin(d_f, _capsule(p, a, b, r0, r1), _K_INTRA)
-        for (c, r) in spheres:
-            if abs(y - c[1]) > r + 0.6:
-                continue
-            d = np.linalg.norm(p - c[None, :], axis=1).astype(np.float32) \
-                - np.float32(r)
-            d_f = _smin(d_f, d, _K_INTRA)
-        d_fings[f] = d_f
-    # thumb CMC capsule
-    q1 = chains[1][0]
-    d_cmc = _capsule(p, cmc_a, q1, 1.30 * hf, 1.06 * hf * _SDF_R_SCALE[1])
-    # combine: palm/fingers with smin, fingers among themselves with min
-    d_hand = _smin(d_body, d_cmc, _K_CMC)
-    d_2345 = INF
-    for f in (2, 3, 4, 5):
-        d_2345 = np.minimum(d_2345, d_fings[f])
-    d_hand = _smin(d_hand, d_2345, _K_PALM)
-    d_hand = _smin(d_hand, d_fings[1], _K_PALM)
-    return d_hand
 
 
 def _build_sdf(hf):
@@ -357,10 +424,11 @@ def _build_sdf(hf):
     raw_caps = _finger_capsules(hf, {f: np.asarray(q, float) for f, q in
                                      chains.items()})
     fing_caps = {}
-    for f, (caps, spheres) in raw_caps.items():
-        fing_caps[f] = ([(f32(a), f32(b), r0, r1) for (a, b, r0, r1) in
-                         caps],
-                        [(f32(c), float(r)) for (c, r) in spheres])
+    for f, (segs, spheres, pads) in raw_caps.items():
+        fing_caps[f] = ([(f32(a), f32(b), r0, r1, az) for (a, b, r0, r1, az)
+                         in segs],
+                        [(f32(c), float(r)) for (c, r) in spheres],
+                        [(f32(c), f32(r)) for (c, r) in pads])
     # Deviation (H6): adaptive y extent. The plan's fixed y[-20,12] clips the
     # F1 rest fingertips (chains reach y~14 at M, ~21 at XXL). Per-hf extent
     # (max rest tip y + 2.0 margin for radii + smoothing) is exact and cheap.
@@ -378,9 +446,7 @@ def _build_sdf(hf):
     zhi = max([float(np.max([q[:, 2].max() for q in chains.values()]))] +
               [float(c[2] + r[2]) for (c, r) in body_ell]) + 1.0
     # finger radii extend past the joint positions themselves
-    from pianoplayer.hand3d import _SPECS as _SP
-    rmax = max(max(_SP[f]["radii"]) * float(hf) * _SDF_R_SCALE[f]
-               for f in (1, 2, 3, 4, 5))
+    rmax = max(H.finger_radius(f, 0) * float(hf) for f in H.FINGERS)
     xlo -= rmax
     xhi += rmax
     zhi += rmax
@@ -402,38 +468,70 @@ def _build_sdf(hf):
     with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
         acc_body = INF.copy()
         for (c, r) in body_ell:
-            m = (Y >= c[1] - r[1] - 2.5) & (Y <= c[1] + r[1] + 2.5)
+            m = (Y >= c[1] - r[1] - 2.0) & (Y <= c[1] + r[1] + 2.0)
             if not m.any():
                 continue
             d = _ellipsoid(_block(m), c, r)
             acc_body[m] = _smin(acc_body[m], d, _K_BODY)
         acc_f = {}
-        for f, (caps, spheres) in fing_caps.items():
+        for f, (segs, spheres, pads) in fing_caps.items():
             acc = INF.copy()
-            for (a, b, r0, r1) in caps:
+            for (a, b, r0, r1, az) in segs:
                 rm = max(float(r0), float(r1))
-                m = (Y >= min(a[1], b[1]) - rm - 0.6) & \
-                    (Y <= max(a[1], b[1]) + rm + 0.6)
+                m = (Y >= min(a[1], b[1]) - rm - 0.5) & \
+                    (Y <= max(a[1], b[1]) + rm + 0.5)
                 if not m.any():
                     continue
-                acc[m] = _smin(acc[m], _capsule(_block(m), a, b, r0, r1),
+                acc[m] = _smin(acc[m],
+                               _capsule_ell(_block(m), a, b, r0, r1, az),
                                _K_INTRA)
             for (c, r) in spheres:
-                m = (Y >= c[1] - r - 0.6) & (Y <= c[1] + r + 0.6)
+                m = (Y >= c[1] - r - 0.5) & (Y <= c[1] + r + 0.5)
                 if not m.any():
                     continue
                 d = np.linalg.norm(_block(m) - c[None, :], axis=1).astype(
                     np.float32) - np.float32(r)
                 acc[m] = _smin(acc[m], d, _K_INTRA)
+            for (c, r) in pads:
+                m = (Y >= c[1] - r[1] - 0.5) & (Y <= c[1] + r[1] + 0.5)
+                if not m.any():
+                    continue
+                acc[m] = _smin(acc[m], _ellipsoid(_block(m), c, r),
+                               _K_INTRA)
             acc_f[f] = acc
         q1 = chains[1][0]
-        # CMC: evaluated everywhere (as in the slice loop: no culling).
-        acc_cmc = _capsule(np.stack([X, Y, Z], axis=1), cmc_a, q1,
-                           1.30 * hf, 1.06 * hf * _SDF_R_SCALE[1])
-        d_2345 = np.minimum(np.minimum(acc_f[2], acc_f[3]),
-                            np.minimum(acc_f[4], acc_f[5]))
-        d_hand = _smin(_smin(_smin(acc_body, acc_cmc, _K_CMC),
-                             d_2345, _K_PALM), acc_f[1], _K_PALM)
+        # thumb CMC capsule (radii from the metacarpal scale, no inflation)
+        r_cmc = 1.15 * hf
+        r_mcp1 = H.finger_radius(1, 0) * hf
+        rm_cmc = max(float(r_cmc), float(r_mcp1))
+        m_cmc = (Y >= min(cmc_a[1], q1[1]) - rm_cmc - 0.5) & \
+            (Y <= max(cmc_a[1], q1[1]) + rm_cmc + 0.5)
+        acc_cmc = INF.copy()
+        if m_cmc.any():
+            acc_cmc[m_cmc] = _capsule(_block(m_cmc), cmc_a, q1,
+                                      r_cmc, r_mcp1)
+        # R2.4 y-dependent webbing: smin inside the web band (bridges the
+        # 0-0.15 cm proximal gaps), plain min outside (tips stay separate).
+        y_kn = 8.2 * hf
+        w_web = _smoothstep(y_kn + H.WEB_Y_LO * hf - 0.5 * hf,
+                            y_kn + H.WEB_Y_LO * hf, Y) * \
+            (1.0 - _smoothstep(y_kn + H.WEB_Y_HI * hf,
+                               y_kn + H.WEB_Y_HI * hf + 0.5 * hf, Y))
+        d2345_min = np.minimum(np.minimum(acc_f[2], acc_f[3]),
+                               np.minimum(acc_f[4], acc_f[5]))
+        d2345_s = _smin(_smin(acc_f[2], acc_f[3], H.WEB_K),
+                        _smin(acc_f[4], acc_f[5], H.WEB_K), H.WEB_K)
+        # NOTE: _blend(), not arithmetic: w*s+(1-w)*m with w in {0,1}
+        # and a +inf field is 0*inf = NaN far from every primitive.
+        d_2345 = _blend(w_web, d2345_s, d2345_min)
+        # thumb<->index web: wider band, larger k (R2.4)
+        w_th = _smoothstep(2.0 * hf, 3.5 * hf, Y) * \
+            (1.0 - _smoothstep(8.0 * hf, 9.5 * hf, Y))
+        d1i_s = _smin(acc_f[1], d2345_min, H.THUMB_WEB_K)
+        d_1 = _blend(w_th, d1i_s, np.minimum(acc_f[1], d2345_min))
+        d_hand = _smin(_smin(acc_body, acc_cmc, _K_CMC),
+                       d_2345, _K_PALM)
+        d_hand = _smin(d_hand, d_1, _K_PALM)
     vol = d_hand.reshape(ny, nx, nz).transpose(1, 0, 2).astype(np.float32)
     return vol, (xs, ys, zs)
 
@@ -523,21 +621,21 @@ def build_rest_mesh(hf, side="right"):
     """Build (or load) the rest mesh; returns (pts, faces, nrm).
 
     Right-hand local SDF; mirrored x + reversed faces for the left hand
-    (same convention as hand3d._arm_surface).  Cached as
-    ``handmesh_{side}_{hf:.2f}_v1.npz`` (rest_pts, faces, rest_nrm).
+    (same convention as hand3d._arm_surface).  Cached under the hashed
+    name (R1.4); pre-R1.4 files are never loaded (no hash to verify).
     """
     s = "left" if str(side).lower().startswith("l") else "right"
     path = cache_path(hf, s)
-    try:
-        if os.path.isfile(path):
-            z = np.load(path, allow_pickle=False)
+    z = _load_cache(path)
+    if z is not None:
+        try:
             if {"rest_pts", "faces", "rest_nrm"} <= set(z.files):
                 return (np.array(z["rest_pts"], float),
                         [tuple(int(v) for v in row)
                          for row in np.array(z["faces"], np.int64)],
                         np.array(z["rest_nrm"], float))
-    except Exception:
-        pass
+        except Exception:
+            pass
     vol, grid = _build_sdf(float(hf))
     pts, tris, nrm = _extract_mesh(vol, grid)
     faces = [tuple(int(v) for v in row) for row in tris]
@@ -558,8 +656,16 @@ def build_rest_mesh(hf, side="right"):
 # skinning weights (H7)
 # --------------------------------------------------------------------------- #
 def compute_weights(rest_pts, bones, rigid_names=("forearm", "palm"),
-                    names=None):
-    """Skinning weights: w = exp(-((d-d_min)/0.45)**2), top-4 renormalised.
+                    names=None, hf=None, web_yrange=None):
+    """R2.7 finger-wise skinning weights.
+
+    Base falloff: w = exp(-((d-d_min)/0.45)**2), top-4 renormalised.  A
+    vertex whose nearest bone belongs to finger `f` blends ONLY the bones
+    of finger `f` (+ rigid palm/forearm/CMC) -- verts near finger i get 0%
+    from finger j != i, so the H7 <=5% leakage criterion holds exactly.
+    The exception is the interdigital web band (`web_yrange`, side-local y):
+    there the two nearest bones may be adjacent fingers and the standard
+    top-4 blend applies (web verts move with both neighbours).
 
     Verts whose nearest bone is a rigid (forearm/palm) bone and whose
     runner-up is >1.0 cm further away get a hard 1.0 (exact rigid motion).
@@ -573,16 +679,60 @@ def compute_weights(rest_pts, bones, rigid_names=("forearm", "palm"),
         d, _, _ = _seg_proj(pts, np.asarray(a, float), np.asarray(bb, float))
         dmat[:, b] = d.astype(np.float32)
     dmin = dmat.min(axis=1)
+    order = np.argsort(dmat, axis=1)
+    best = order[:, 0]
+
+    def finger_of(bi):
+        if names is None or bi >= len(names):
+            return None
+        nm = names[bi]
+        if len(nm) == 4 and nm[0] == "f" and nm[2] == "_" and \
+                nm[1] in "12345" and nm[3] in "012":
+            return int(nm[1])
+        return None
+
+    f_of_bone = np.array([finger_of(b) for b in range(B)], object)
+    rigid = set(rigid_names or ())
+    is_rigid = np.array([(names[b] in rigid) if names is not None and
+                         b < len(names) else False for b in range(B)])
+    is_cmc = np.array([(names[b] == "f1_cmc") if names is not None and
+                       b < len(names) else False for b in range(B)])
+    best_f = np.array([f_of_bone[b] for b in best], object)
+    in_web = np.zeros(N, bool)
+    if web_yrange is not None:
+        ylo, yhi = web_yrange
+        second = order[:, 1]
+        second_f = np.array([f_of_bone[b] for b in second], object)
+        adj = {(2, 3), (3, 2), (3, 4), (4, 3), (4, 5), (5, 4),
+               (1, 2), (2, 1)}
+        pair_ok = np.array([(a is not None and c is not None
+                             and (a, c) in adj)
+                            for a, c in zip(best_f.tolist(),
+                                            second_f.tolist())])
+        in_web = pair_ok & (pts[:, 1] >= ylo) & (pts[:, 1] <= yhi)
+
     w = np.exp(-((dmat - dmin[:, None]) / 0.45) ** 2).astype(np.float32)
+    if names is not None and len(names) == B and \
+            any(v is not None for v in f_of_bone):
+        # R2.7: mask out other fingers' bones, but only for verts whose
+        # nearest bone is itself a finger bone (palm/rigid transitions at
+        # the finger base keep their smooth blend) and outside the web.
+        best_is_finger = np.array([v is not None for v in best_f.tolist()])
+        allow = np.ones((N, B), bool)
+        for b in range(B):
+            fb = f_of_bone[b]
+            if fb is None:
+                continue  # rigid / CMC: always allowed
+            mask_out = best_is_finger & (best_f != fb) & (~in_web)
+            allow[mask_out, b] = False
+        # never strand a vertex: the best bone is always allowed
+        allow[np.arange(N), best] = True
+        w = np.where(allow, w, 0.0)
     idx = np.argsort(-w, axis=1)[:, :4]
     w4 = np.take_along_axis(w, idx, axis=1)
     w4 /= np.maximum(w4.sum(axis=1, keepdims=True), 1e-12)
-    rigid = set(rigid_names or ())
     if rigid and names is not None and len(names) == B:
-        order = np.argsort(dmat, axis=1)
-        best = order[:, 0]
         second = dmat[np.arange(N), order[:, 1]]
-        is_rigid = np.array([nm in rigid for nm in names])
         hard = is_rigid[best] & ((second - dmin) > 1.0)
         w4[hard] = np.array([[1.0, 0.0, 0.0, 0.0]], np.float32)
         # keep the best bone first so the hard row is exact
@@ -593,12 +743,11 @@ def compute_weights(rest_pts, bones, rigid_names=("forearm", "palm"),
 def get_rest_data(hf, side="right"):
     """Full cached rest set: pts/faces/nrm/idx/w/bones/names/P0/R0."""
     s = "left" if str(side).lower().startswith("l") else "right"
-    path = cache_path(hf, s)
     bones, names = rest_bones(hf, s)
     _, _, P0, R0 = rest_frames(hf, s)
-    try:
-        if os.path.isfile(path):
-            z = np.load(path, allow_pickle=False)
+    z = _load_cache(cache_path(hf, s))
+    if z is not None:
+        try:
             if {"rest_pts", "faces", "rest_nrm", "idx", "w"} <= set(z.files):
                 return dict(
                     pts=np.array(z["rest_pts"], float),
@@ -608,10 +757,14 @@ def get_rest_data(hf, side="right"):
                     idx=np.array(z["idx"], np.int16),
                     w=np.array(z["w"], np.float32),
                     bones=bones, names=names, P0=P0, R0=R0)
-    except Exception:
-        pass
+        except Exception:
+            pass
     pts, faces, nrm = build_rest_mesh(hf, s)
-    idx, w = compute_weights(np.asarray(pts, float), bones, names=names)
+    y_kn = 8.2 * float(hf)
+    idx, w = compute_weights(np.asarray(pts, float), bones, names=names,
+                             hf=hf,
+                             web_yrange=(y_kn + H.WEB_Y_LO * float(hf),
+                                         y_kn + H.WEB_Y_HI * float(hf)))
     try:
         np.savez_compressed(path, rest_pts=np.asarray(pts, np.float32),
                             faces=np.array(faces, np.int64),
@@ -649,8 +802,14 @@ def _value_noise(size, cells, seed):
                                  Image.BILINEAR)).astype(np.float32) / 255.0
 
 
-def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82):
-    """Procedural 512^2 skin PNG: tone noise, joint/palm creases, nails."""
+def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
+                       side="right"):
+    """Procedural 512^2 skin PNG: tone noise, joint/palm creases, nails.
+
+    Rendered from side-local bones, so creases/nails align on every (hf,
+    side) pair (R1.5); the pore speckle seed differs per side so the files
+    are never accidentally shared.
+    """
     from PIL import Image, ImageDraw
     S = 512
     base = np.array([0.95, 0.80, 0.70], float)
@@ -741,8 +900,9 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82):
     arr[..., 0] = np.clip(arr[..., 0] + 0.015 * blush, 0, 1)
     arr[..., 1] = np.clip(arr[..., 1] - 0.010 * blush, 0, 1)
     arr[..., 2] = np.clip(arr[..., 2] - 0.008 * blush, 0, 1)
-    # pore speckle
-    rng = np.random.default_rng(29)
+    # pore speckle (seed per side: the files must never be shared, R1.5)
+    rng = np.random.default_rng(29 if str(side).lower().startswith("r")
+                                else 31)
     arr *= (1.0 + (rng.random((S, S)) - 0.5) * 0.018)[..., None]
     out = Image.fromarray((np.clip(arr, 0, 1) * 255.0 + 0.5).astype(np.uint8))
     try:
@@ -751,3 +911,13 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82):
     except Exception:
         pass
     return out_png
+
+
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    import sys as _sys
+    if "--clear-cache" in _sys.argv[1:]:
+        print("cleared %d file(s) in %s" % (clear_cache(), cache_dir()))
+    else:
+        print("usage: python -m pianoplayer.handmesh --clear-cache")
+        _sys.exit(2)

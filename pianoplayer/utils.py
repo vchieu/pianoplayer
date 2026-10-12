@@ -182,3 +182,20 @@ def score_tempo_map(sf, default=72.0):
 def score_tempo(sf, default=72.0):
     """First tempo (quarter-note bpm) of a music21 score, or `default`."""
     return score_tempo_map(sf, default)[0][1]
+
+
+def beat_to_seconds(beat, tempo_map, speedfactor=1.0):
+    """Seconds (already divided by `speedfactor`) at quarter-length `beat`.
+
+    Integrates `tempo_map` ([(offset_quarters, bpm), ...]) piecewise.
+    Shared by playback (`vkeyboard._beat_seconds`) and fingering
+    (`scorereader` stamps `INote.t_sec` through it), so both agree exactly.
+    """
+    tm = tempo_map or [(0.0, 72.0)]
+    t = 0.0
+    for k, (off, bpm) in enumerate(tm):
+        if beat <= off:
+            break
+        end = tm[k + 1][0] if k + 1 < len(tm) else float("inf")
+        t += (min(beat, end) - off) * 60.0 / max(float(bpm), 1e-3)
+    return t / max(float(speedfactor), 1e-6)
