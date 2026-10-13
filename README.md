@@ -187,7 +187,9 @@ default the algorithm selects this number automatically based on the duration of
 This option only applies to the legacy sliding-window search mode; the default solver looks at the whole passage at once.
 
 ## Limitations
-- Some specific fingering combinations, considered too unlikely in the first place, are excluded from the search (e.g. the 3rd finger crossing the 4th).
+- Awkward crossings (e.g. the 3rd finger over the 4th) are allowed but pay a
+  soft cost scaling with interval and inverse time; chords are always pinned
+  to monotonic fingerings.
 - Hands are always assumed independent from each other.
 - Small notes/ornaments are ignored.
 

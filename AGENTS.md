@@ -75,12 +75,24 @@ the score tempo map -- see F1) pay `WEAK_FINGER_PENALTY = +3`. Lower total is be
 **Skip rules** (`_skip_penalty`, hard-soft with `HARD = 200.0` added per
 violation, applied to **every** consecutive pair including chord<->note):
 same finger on two different notes/pitches, finger crossings, thumb-to-black
-crossings, and (inside chords) finger-order violations plus a set of
-normalized stretch thresholds (`axba = |dx| * hf / 0.8` vs. finger-pair
-limit). Same finger on different keys is HARD only while the first note is
+crossings, and (inside chords) finger-order violations plus smooth span
+costs (`MAX_SPAN`/`COMFORT_SPAN` tables in `handspec.py`, quadratic ramp to
+`HARD` beyond max, F4a). Same finger on different keys is HARD only while the first note is
 still held or the gap is at most 0.25 s; slower reuse pays a soft
-`SAME_FINGER_BASE + 0.15 * |dx|` (F3). Soft (added cost, still losable) rather than pruning, so a legacy
+`SAME_FINGER_BASE + 0.15 * |dx|` (F3). Non-thumb crossings pay a soft
+`CROSS_BASE` cost scaling with interval and inverse time (F5); thumb-under
+pays `UNDER[fa]` (after-3 cheapest, halved when departing a black key onto
+white). Thumb-under steps arriving on white ride the hand shift
+(`reach_err = 0.02`, < 4.0 cm). Static black/white preference per finger
+(`BLACK_COST`, F6) is added, not velocity-multiplied. Soft (added cost, still losable) rather than pruning, so a legacy
 finger 0 or an impossible spot never kills a whole solution.
+
+**Chord post-pass** (`_apply_chord_candidates`, F4b): after Viterbi, every
+chord group (≤5 notes) is pinned to one whole monotonic candidate
+(pre-generated `C(5,k)`, top-6 by static cost, never empty) minimizing static
++ neighbour transition costs -- the order-2 Viterbi state cannot enforce
+whole-chord consistency. `_repair_held` keeps chord pitch order when
+re-fingering members, then reports cost delta (F7).
 
 **Held-finger constraint** (`pair_cost` + `_repair_held`): when note `a` still
 sounds while `b` starts (`a.time_real + a.dur_real > b.time_real + HELD_EPS`),

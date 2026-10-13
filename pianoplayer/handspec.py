@@ -273,7 +273,14 @@ CROSS_BASE = {
     (3, 4): 1.2, (3, 5): 1.8,
     (4, 5): 1.0,
 }
-UNDER = {2: 1.5, 3: 1.0, 4: 2.0, 5: 3.0}  # thumb-under cost after finger
+UNDER = {2: 3.0, 3: 1.0, 4: 8.0, 5: 9.0}  # thumb-under cost after finger:
+        # pedagogy prefers tucking after the middle finger (3); after the
+        # ring (4) only when topography demands it (F major: 4 lands on
+        # Bb); after 2/5 almost never. Margins must exceed ~2.5 cost units
+        # or downstream strong-finger benefits (3 on black keys) outweigh
+        # them (G-major gold regression). Halved (in _crossing_cost) when
+        # departing from a black key onto white: the hand is already
+        # raised, so the classic Bb->C tuck rides the hand position.
 
 # F6: static black/white preference per finger (added to pair_cost, not
 # multiplied by velocity).  Positive = penalty for black keys.

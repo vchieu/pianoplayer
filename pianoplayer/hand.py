@@ -157,38 +157,77 @@ class Hand:
 
     def _chord_finger_candidates(self, chord_notes):
         """F4b: Generate monotonic finger sets for a chord (≤5 notes).
-        Returns top-K=6 candidates by static cost, or all if fewer."""
+
+        Returns top-K=6 candidates by static cost. Never returns empty:
+        if the span filter rejects every monotonic combo, retry unfiltered
+        (monotonicity is guaranteed by construction either way).
+        """
         k = len(chord_notes)
         if k > 5:
             warnings.warn(f"Chord with {k} notes > 5: splitting", stacklevel=2)
             return None  # Signal to split
         fingers = (1, 2, 3, 4, 5)
         # Generate all monotonic combinations C(5, k)
-        candidates = []
+        combos = []
         for combo in itertools.combinations(fingers, k):
             # Monotonic order: right hand ascending (low pitch -> low finger),
             # left hand descending (low pitch -> high finger)
             if self.LR == "right":
-                fings = list(combo)
+                combos.append(list(combo))
             else:
-                fings = list(reversed(combo))
-            # Filter by total span (sum of adjacent spans)
-            total_span = 0
-            ok = True
-            for i in range(k - 1):
-                span_cm = abs(chord_notes[i+1].x - chord_notes[i].x) * self.hf
-                sc = self._span_cost(fings[i], fings[i+1], span_cm)
-                if sc >= HARD:
-                    ok = False
-                    break
-                total_span += span_cm
-            if not ok:
+                combos.append(list(reversed(combo)))
+        # Pass 1: filter by span (adjacent pairs must fit MAX_SPAN)
+        cands = [c for c in combos if self._chord_span_ok(c, chord_notes)]
+        if not cands:
+            cands = list(combos)  # pass 2: span-relaxed, still monotonic
+        scored = [(self._static_chord_cost(c, chord_notes), c) for c in cands]
+        scored.sort(key=lambda x: x[0])
+        return [f for _, f in scored[:6]]
+
+    def _chord_span_ok(self, fings, chord_notes):
+        """True when every adjacent pair of the chord fits MAX_SPAN."""
+        for i in range(len(fings) - 1):
+            span_cm = abs(chord_notes[i + 1].x - chord_notes[i].x) * self.hf
+            if self._span_cost(fings[i], fings[i + 1], span_cm) >= HARD:
+                return False
+        return True
+
+    def _apply_chord_candidates(self, notes, fingers):
+        """F4b post-pass: pin every chord group to one whole candidate.
+
+        The order-2 Viterbi state cannot enforce whole-chord consistency
+        (HARD is a soft cost, so paths can switch candidates mid-chord);
+        this pass picks, per group, the candidate minimizing static cost
+        plus transition costs to the fixed neighbours. Monotonicity and
+        distinct fingers hold by construction.
+        """
+        f = list(fingers)
+        n = len(notes)
+        for start, end, chord_notes in self._group_chords(notes):
+            cands = self._chord_candidates.get(start)
+            if not cands:
                 continue
-            static_cost = self._static_chord_cost(fings, chord_notes)
-            candidates.append((static_cost, fings))
-        # Sort by static cost, keep top 6
-        candidates.sort(key=lambda x: x[0])
-        return [f for _, f in candidates[:6]]
+            k = end - start
+            best, bestc = None, None
+            for c in cands:
+                if len(c) != k:
+                    continue
+                tot = self._static_chord_cost(c, chord_notes)
+                if start > 0:
+                    tot += self.pair_cost(notes[start - 1], f[start - 1],
+                                          notes[start], c[0])
+                for i in range(k - 1):
+                    tot += self.pair_cost(notes[start + i], c[i],
+                                          notes[start + i + 1], c[i + 1])
+                if end < n:
+                    tot += self.pair_cost(notes[end - 1], c[-1],
+                                          notes[end], f[end])
+                if best is None or tot < bestc:
+                    best, bestc = c, tot
+            if best is not None:
+                for i, fb in enumerate(best):
+                    f[start + i] = fb
+        return f
 
     def _group_chords(self, notes):
         """Group consecutive notes with same chordID into chord groups.
@@ -239,9 +278,15 @@ class Hand:
         # Thumb-under: fb == 1 (thumb passes under fa)
         if fb == 1 and fa > 1:
             base = _HS.UNDER.get(fa, 1.0)
-            # Thumb-under on white keys is standard technique - very low cost
-            if not nb.isBlack:
-                base *= 0.1  # nearly free on white keys
+            # Departing from a black key onto white (the classic Bb->C tuck):
+            # the hand is already raised, so the tuck rides the hand position
+            # (halved). White->white tucks pay full UNDER so the after-3 vs
+            # after-4 margin survives downstream strong-finger benefits
+            # (G-major gold); tucking ONTO black pays full base plus the
+            # bfactor velocity penalty (legacy no-thumb-on-black rule).
+            if na.isBlack and not nb.isBlack:
+                base *= 0.5
+        # Thumb-over: fa == 1 (fa is thumb, fb passes over) - rare
         # Thumb-over: fa == 1 (fa is thumb, fb passes over) - rare
         elif fa == 1 and fb > 1:
             base = _HS.UNDER.get(fb, 2.0)
@@ -341,12 +386,17 @@ class Hand:
         # For left hand (mirrored): thumb-under is fa=2 (index), fb=1, ascending white-to-white
         # Also: left hand after thumb (1) goes to middle (3) for the next white step
         eff_xba = -xba if self.LR == "left" else xba
-        ascending_white = (eff_xba > 0 and not na.isBlack and not nb.isBlack)
+        # Hand-shift credit applies when arriving on white (departure may be
+        # black: the classic Bb->C tuck; arrival on black never gets credit).
+        ascending_white = (eff_xba > 0 and not nb.isBlack)
         is_thumb_under_right = (self.LR == "right" and fa in (3, 4) and fb == 1 and ascending_white)
         is_thumb_under_left = (self.LR == "left" and fa == 2 and fb == 1 and ascending_white)
         # Left hand: after thumb (1), middle (3) takes the next white key step (hand shift)
         is_left_thumb_to_middle = (self.LR == "left" and fa == 1 and fb == 3 and ascending_white)
-        is_step = (is_thumb_under_right or is_thumb_under_left or is_left_thumb_to_middle) and abs(nb.x - na.x) < 3.0
+        # Whole-step tucks (Bb->C = 3.54 cm) are standard: cap at 4.0 cm so
+        # fourths and wider still pay full translation, semitones/whole
+        # steps ride the hand shift.
+        is_step = (is_thumb_under_right or is_thumb_under_left or is_left_thumb_to_middle) and abs(nb.x - na.x) < 4.0
         
         if same_key:
             reach_err = 0.0
@@ -414,8 +464,9 @@ class Hand:
         starts (B2). Back-pointers recover the cheapest path; ties keep
         the first minimum, so repeated runs agree exactly.
         
-        F4b: For chord notes, restrict transitions to precomputed candidates
-        as WHOLE fingerings per chord group (not per-position).
+        F4b: chord groups are pinned to whole candidates by
+        `_apply_chord_candidates` after the solve (not here: an order-2
+        state cannot enforce whole-chord consistency).
         F8: Vectorized pair_cost table per note pair.
         """
         n = len(notes)
@@ -448,55 +499,16 @@ class Hand:
         start_pref = {1: -10.0, 5: -1.0} if self.LR == "right" else {5: -5.0, 1: -1.0}
         for fa in fingers:
             for fb in fingers:
-                # Check if first note is part of a chord with restricted candidates
-                if 0 in self._chord_spans:
-                    start, end = self._chord_spans[0]
-                    if 0 < end and fa not in self._chord_candidates[0][0]:
-                        dp[(fa, fb)] = HARD
-                        continue
                 dp[(fa, fb)] = cost_tables[0][fa, fb] + start_pref.get(fa, 0.0)
-        
+
         back = {1: {k: k[0] for k in dp}}
         for i in range(2, n):
             na, nb, nc = notes[i-1], notes[i], notes[i-2]
             nc_held = nc.time_real + nc.dur_real > nb.time_real + HELD_EPS
             ndp, nback = {}, {}
-            
-            # Check if current note is part of a chord
-            chord_start = None
-            for cs, (start, end) in self._chord_spans.items():
-                if start <= i < end:
-                    chord_start = cs
-                    break
-            
+
             for fa in fingers:
                 for fb in fingers:
-                    # F4b: Restrict fb to chord candidates if in chord
-                    if chord_start is not None:
-                        chord_cands = self._chord_candidates[chord_start]
-                        local_idx = i - chord_start
-                        # Whole-candidate constraint: we must be at the correct
-                        # position within ONE of the precomputed chord fingerings.
-                        # Check if there exists a candidate where position local_idx = fb.
-                        allowed_fbs = {c[local_idx] for c in chord_cands}
-                        if fb not in allowed_fbs:
-                            ndp[(fa, fb)] = HARD
-                            nback[(fa, fb)] = fa
-                            continue
-                        
-                        # Additional constraint: ensure the PREVIOUS note's finger
-                        # matches the SAME candidate at position local_idx-1.
-                        # This enforces whole-candidate consistency across the chord.
-                        if local_idx > 0:
-                            valid_fps = set()
-                            for c in chord_cands:
-                                if c[local_idx] == fb:
-                                    valid_fps.add(c[local_idx - 1])
-                            if fa not in valid_fps:
-                                ndp[(fa, fb)] = HARD
-                                nback[(fa, fb)] = fa
-                                continue
-                    
                     pc = cost_tables[i-1][fa, fb]
                     best, bestfp = None, None
                     for fp in fingers:
@@ -556,6 +568,29 @@ class Hand:
             for cand in (1,2,3,4,5):
                 if cand in blocked:
                     continue
+                # F4b: repairing a chord member must not break the chord's
+                # pitch order. In (possibly mirrored) x, both hands want
+                # fingers strictly increasing with x (left x is negated in
+                # generate(), so low pitch = large x = large finger).
+                if bi.isChord:
+                    keep = True
+                    for j in range(n):
+                        if j == i or f[j] not in (1,2,3,4,5):
+                            continue
+                        aj = notes[j]
+                        if not aj.isChord or aj.chordID != bi.chordID:
+                            continue
+                        if abs(aj.x - bi.x) < 1e-9:
+                            if cand != f[j]:
+                                keep = False  # same pitch: same finger
+                                break
+                            continue
+                        if (aj.x < bi.x and not f[j] < cand) or \
+                           (aj.x > bi.x and not cand < f[j]):
+                            keep = False
+                            break
+                    if not keep:
+                        continue
                 c = 0.0
                 if i > 0:
                     c += self.pair_cost(notes[i-1], f[i-1], bi, cand)
@@ -732,6 +767,7 @@ class Hand:
         else:
             sub = [self.noteseq[i] for i in kept]
             fingers = self.solve_viterbi(sub)
+            fingers = self._apply_chord_candidates(sub, fingers)
             fingers = self._repair_held(sub, fingers)
 
         for k, i in enumerate(kept):##############
