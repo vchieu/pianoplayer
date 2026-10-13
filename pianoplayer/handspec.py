@@ -291,12 +291,15 @@ WHITE_COST = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
 def geom_hash():
     """8-char sha1 over geometry + SDF constants + grid + version (R1.4).
 
-    NOTE: the hash covers constants only. Geometry LOGIC changes (e.g. a
-    rest_chains formula or coupling edit) are invisible to it -- bump
-    HANDMESH_VERSION manually with every such change (v3 -> v4 above was
-    exactly this case: the thumb formula reuses unhashed THUMB_BASE_Y0 /
-    THUMB_FWD inputs differently, and the coupling change reuses the
-    unchanged REST_DIP_RATIO value, so the hash alone rebuilt nothing).
+    NOTE: the hash covers GEOMETRY constants only. Fingering cost tables
+    (MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST)
+    are deliberately EXCLUDED: retuning them must not invalidate the mesh
+    cache. Geometry LOGIC changes (e.g. a rest_chains formula or coupling
+    edit) are invisible to it -- bump HANDMESH_VERSION manually with every
+    such change (v3 -> v4 above was exactly this case: the thumb formula
+    reuses unhashed THUMB_BASE_Y0 / THUMB_FWD inputs differently, and the
+    coupling change reuses the unchanged REST_DIP_RATIO value, so the hash
+    alone rebuilt nothing).
     """
     rep = repr((FINGER_SPECS, FING_R_SCALE, MCP_SHRINK, ARM_PROFILE,
                 ARM_PIN, THENAR, HYPO, WEB_RADII, THUMB_CMC_A,
@@ -307,6 +310,5 @@ def geom_hash():
                 PIP_MOUND, DIP_MOUND, MCP_MOUND_R, PALM_ARCH, WEB_K,
                 WEB_Y_LO, WEB_Y_HI, THUMB_WEB_K, THUMB_WEB_FRAC,
                 K_INTRA, K_PALM, K_CMC, K_BODY, GRID_STEP, GRID_Y0,
-                TRIS_MAX, HANDMESH_VERSION,
-                MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST))
+                TRIS_MAX, HANDMESH_VERSION))
     return hashlib.sha1(rep.encode()).hexdigest()[:8]
