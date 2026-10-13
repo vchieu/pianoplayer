@@ -185,6 +185,16 @@ _BREATHE_PHASE = {1: 0.0, 2: 1.3, 3: 2.1, 4: 3.4, 5: 4.2}  # per-finger phase
 # the root chases with this faster time constant for that frame only.
 _CHASE_TAU = 0.03
 _CHASE_ERR = 0.1
+# v5 coincidence guard (bug3 melt): a free (idle-transit) finger whose key-x
+# target nearly coincides with an anchored (held/aiming/pressed) finger would
+# drive its chain through the anchored finger's tube; the skin then reads as
+# one melted mass.  The free finger steps aside to this x distance and rides
+# this much higher, passing over.  Anchored fingers are never moved (held-exact
+# + pressed-converge guarantees); semitone grips (both anchored, ~1.18 cm
+# apart) never trigger.  SEP clears the tube diameters in 3D together with
+# the lift (sqrt(1.4^2 + ~1.5^2) > proximal radii sums).
+_COINCIDE_SEP = 1.4
+_COINCIDE_LIFT = 0.8
 # D6: looks -- skin material, joint shading, blob shadows.
 _SKIN_AMBIENT = 0.40
 _SKIN_DIFFUSE = 0.70
@@ -662,8 +672,9 @@ class HandRig:
                 # D1b: thumb MCP forward (per-instance, progressive with size)
                 base = (base[0], self._thumb_by, base[2])
             lens = [l * self.hf for l in spec["lens"]]
-            # H2: visual width (IK only uses lens); thumb keeps its size.
-            radii = [r * self.hf * _FING_R_SCALE[f] for r in spec["radii"]]
+            # H2: visual width (IK only uses lens); single source: the same
+            # finger_radius() the SDF skin uses (v5 distal taper included).
+            radii = [_HS.finger_radius(f, j) * self.hf for j in range(4)]
             seg, t, s, r = _finger_stations(lens, radii)
             K = len(seg)
             fpts = np.zeros((K * _FING_M + 2, 3))
@@ -1414,13 +1425,45 @@ class HandRig:
                           # chases their mean, so the idle lerp cannot drag
                           # the root (and the pressed fingers) away with it.
         black_pressed = False
-        # H1.2: natural (parallel) slots from the root at frame start --
-        # the root spring below moves afterwards, so this cannot feed back.
-        natural = self._neutral_x()
+        # v5 coincidence guard: raw x per finger, then step free fingers
+        # aside from anchored ones (see _COINCIDE_*).  Continuous in the
+        # pair distance (push/lift -> 0 at the threshold), so no pops; the
+        # downstream glide + idle lerp slew the adjusted target smoothly.
+        # World-cm constants are tuned at M: scale them with hand size like
+        # the other rest offsets (an M-sized step would shove an XXS hand
+        # across its whole span).
+        rs0 = self.hf / _REST_REF_HF
+        csep = _COINCIDE_SEP * rs0
+        clift = _COINCIDE_LIFT * rs0
+        raw_x = {}
         for f in FINGERS:
             x = finger_x.get(f) if finger_x else None
             if x is None:
                 x = self._targets_x.get(f)
+            if x is not None:
+                raw_x[f] = float(x)
+        anchored = {f for f in FINGERS
+                    if f in held or f in aim_set
+                    or float(press.get(f, 0.0)) > 0.5}
+        lift = {}
+        for g in FINGERS:
+            if g not in raw_x or g in anchored:
+                continue
+            for h in FINGERS:
+                if h not in raw_x or h not in anchored:
+                    continue
+                d = raw_x[g] - raw_x[h]
+                if abs(d) < csep:
+                    s = 1.0 if d >= 0.0 else -1.0
+                    raw_x[g] = raw_x[h] + s * csep
+                    push = csep - abs(d)
+                    lift[g] = max(lift.get(g, 0.0),
+                                  clift * push / csep)
+        # H1.2: natural (parallel) slots from the root at frame start --
+        # the root spring below moves afterwards, so this cannot feed back.
+        natural = self._neutral_x()
+        for f in FINGERS:
+            x = raw_x.get(f)
             if x is None:
                 continue
             fan_xs[f] = float(x)        # pre-lerp target for root = fan target
@@ -1439,9 +1482,13 @@ class HandRig:
                 self._sx[f] = x
             a = float(min(max(press_amt, 0.0), 1.0))
             rest = 1.0 - a
-            if f not in held and f not in aim_set and rest > 0.5:
+            if f not in held and f not in aim_set and rest > 0.5 \
+                    and f not in lift:
                 # H1.2/1.3: idle fingers head for their natural slots and
-                # the idle thumb splays outward like a real hand.
+                # the idle thumb splays outward like a real hand.  A guard-
+                # pushed finger (v5 coincidence guard above) keeps its
+                # stepped-aside x: lerping it here would drag it straight
+                # back onto the occupied key it just left.
                 x = ((1.0 - _IDLE_NATURAL_LERP) * float(x)
                      + _IDLE_NATURAL_LERP * natural[f])
                 if f == 1:
@@ -1477,7 +1524,7 @@ class HandRig:
             else:
                 z = pressed_z
                 yy = y
-            targets[f] = (float(x), yy, z, a)
+            targets[f] = (float(x), yy, z + lift.get(f, 0.0), a)
             black_pressed = black_pressed or (black and a > 0.004)
         self._targets_x = {f: t[0] for f, t in targets.items()}
         
@@ -1594,6 +1641,16 @@ class HandRig:
             g = self._geom[f]
             base = self.root + R @ g["base_local"]
             pole = R @ g["pole_local"]
+            lz = lift.get(f, 0.0)
+            if lz > 0.0:
+                # cap the pass-over lift at what the chain can reach: a
+                # pushed black-key target can exceed the (short) thumb's
+                # range, which reads as a dangling straight finger (bend 0).
+                cap = 0.98 * float(sum(g["lens"]))
+                dx, dy = x - base[0], y - base[1]
+                r2 = cap * cap - dx * dx - dy * dy
+                if r2 > 0.0:
+                    z = min(z, base[2] + math.sqrt(r2))
             pts, b1 = solve_chain(base, (x, y, z), g["lens"],
                                   pole, self.BEND_MAX,
                                   self.COUPLING)

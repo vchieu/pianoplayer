@@ -221,7 +221,13 @@ max ~0.4 cm/frame) then relax 75% toward their natural parallel slots
 a small `0.08*sin(2π*0.35*t)` breathing oscillation (offsets scaled by
 `hf/0.82`); fingers in the `held`/`aim_fingers` sets (see `vkeyboard._pump`)
 keep exact targets and the root spring chases the pre-lerp fan mean, so
-held fingers never drift. Joint rings get darker vertex colours; nails are a subtle vertex-colour patch
+held fingers never drift. A free (idle-transit) finger whose key-x target
+lands within `_COINCIDE_SEP = 1.4` cm (× `hf/0.82`) of an anchored
+(held/aiming/pressed) finger steps aside to that distance and rides
+`_COINCIDE_LIFT = 0.8` cm higher, passing over instead of driving its chain
+through the anchored tube (bug3 melt); pushed fingers skip the idle lerp
+(which would drag them back) and the lift is reach-capped in z so the short
+thumb never dangles. Anchored fingers are never moved. Joint rings get darker vertex colours; nails are a subtle vertex-colour patch
 (no mesh, no white dots); pressed fingers blush only near the tip
 (`smoothstep(0.6,1.0,snorm)`) with contact AO baked into the pad side;
 each hand carries one opaque blob shadow of the *skinned* mesh flattened
@@ -257,7 +263,13 @@ MCP/PIP/DIP spheres + flattened pad-tip ellipsoid, thumb CMC capsule.
 Combination uses `smin` (`-k*logaddexp`): intra-finger `k=0.05`,
 finger/body joins `k=0.35`, thumb-CMC/body `k=0.40`, body chain `k=0.30`;
 y-dependent webbing (`smin k=0.25` inside the web band, plain `min()`
-outside so neighbours touch but never fuse, F2); thumb<->index web `k=0.50`.
+outside so neighbours touch but never fuse, F2); thumb<->index web `k=0.35`.
+Finger radii taper distally (`FING_R_TAPER`: DIP ×0.85, tip ×0.80; MCP/PIP
+untouched so the graded proximal section stays put) and the thumb runs
+slimmer proximally (1.06/0.96 → 0.98/0.88) to carve the thenar groove; the
+web band tops at `WEB_Y_HI = 0.6` past the knuckles (was 1.2) so fusion
+stays proximal like a real web. Distal gaps at M: ~0.3-1.0 cm (SDF
+`CC@85%` = 4); proximal gaps stay webbed (`CC@50%` = 1, `gap50` ≤ 0.15).
 Grid step 0.15 cm over adaptive bounds; `vtkFlyingEdges3D` iso=0 →
 `vtkWindowedSincPolyDataFilter` (15 iter) → `vtkQuadricDecimation`
 (≤8000 tris, `TRIS_MAX`) → normals. Cached to
@@ -268,7 +280,8 @@ First build ~4.7-7.2 s at size M (~8-13 s at L/XL/XXL on this
 machine), cached load ~40 ms for the full mesh + weight set. Left hand mirrors x +
 reverses face winding (same as `_arm_surface`). `geom_hash()` covers
 constants only -- geometry logic changes need a manual `HANDMESH_VERSION`
-bump (v4: thumb MCP base matches the rig, rest coupling 0.65).
+bump (v5: distal taper + slimmer thumb + proximal-only webbing; v4: thumb
+MCP base matches the rig, rest coupling 0.65).
 
 **Skinning weights** (`handmesh.compute_weights`): 18 bones (forearm, palm,
 f1_cmc + 3 per finger). Distance-to-segment `d`; weight `w = exp(-((d-d_min)/0.45)^2)`;

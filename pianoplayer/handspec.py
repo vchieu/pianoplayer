@@ -33,7 +33,11 @@ FINGER_NAMES = {1: "thumb", 2: "index", 3: "middle", 4: "ring", 5: "little"}
 # articulation (R5.3, deferred -- see Deviations).
 FINGER_SPECS = {
     1: dict(base=(-5.6, 3.0, 0.45), lens=(3.2, 2.2, 1.9),
-            radii=(1.06, 0.96, 0.83, 0.60), pole=(0.15, 0.55, 1.00)),
+            # v5: proximal radii 1.06/0.96 -> 0.98/0.88 (thumb/index groove:
+            # the thumb is ungraded by gap50/pip_spacing, which only cover
+            # pairs (2,3)/(3,4)/(4,5); slimmer thumb + narrower web below
+            # carve the thenar groove instead of a melted blend).
+            radii=(0.98, 0.88, 0.83, 0.60), pole=(0.15, 0.55, 1.00)),
     2: dict(base=(-2.1, 8.2, 1.85), lens=(3.9, 2.5, 2.0),
             radii=(0.96, 0.89, 0.77, 0.55), pole=(0.00, 0.35, 1.00)),
     3: dict(base=(0.15, 8.6, 1.95), lens=(4.3, 2.7, 2.1),
@@ -49,6 +53,14 @@ FINGER_SPECS = {
 # (_SDF_R_SCALE 1.30-1.58) on top of this one; it is removed in R1.2 and the
 # SDF uses these same radii.
 FING_R_SCALE = {1: 1.0, 2: 1.10, 3: 1.12, 4: 1.13, 5: 1.13}
+
+# v5 (inter-finger gaps): distal taper per joint index (MCP, PIP, DIP, tip).
+# The green spec gates pin the proximal section: gap50/pip_spacing are graded
+# on joints 0-1 only, with gap50 headroom +0.015 cm (uniform thinning to 1.00
+# would push gap50 to ~0.32 vs max 0.15 and pip_spacing to ~0.85 vs min 0.85),
+# so only DIP/tip slim down. Real fingers taper distally; the PIP knuckle
+# (PIP_MOUND reads max(R1, R2)) keeps its size since R1 is untouched.
+FING_R_TAPER = {0: 1.0, 1: 1.0, 2: 0.85, 3: 0.80}
 
 # R1.2: MCP spacing shrink (fraction) applied to fingers 2-5 about the
 # middle-finger base x.  2% closes the rest gap to [0, 0.15] cm together
@@ -78,8 +90,11 @@ def finger_radius(f, joint=1):
 
     R1.2: the SDF skin uses this same radius (the old extra _SDF_R_SCALE
     inflation table is deleted); MCP radius stays <= 0.5 x MCP spacing.
+    v5: distal taper (FING_R_TAPER) slims DIP/tip so neighbours separate
+    past the knuckles; joints 0-1 (the graded proximal section) untouched.
     """
-    return FINGER_SPECS[f]["radii"][joint] * FING_R_SCALE[f]
+    return (FINGER_SPECS[f]["radii"][joint] * FING_R_SCALE[f]
+            * FING_R_TAPER[joint])
 
 
 def thumb_index_ratio():
@@ -239,8 +254,13 @@ PALM_ARCH = 0.18         # dorsal arch height factor (z(x) curve) --
                          # no explicit transverse arch term exists yet
 WEB_K = 0.25             # smin k inside the interdigital web band
 WEB_Y_LO = -1.6          # web band lower edge rel. knuckle line (x hf)
-WEB_Y_HI = 1.2           # web band upper edge rel. knuckle line (x hf)
-THUMB_WEB_K = 0.50       # thumb<->index web uses a wider blend
+WEB_Y_HI = 0.6           # web band upper edge rel. knuckle line (x hf)
+                         # (v5: 1.2 -> 0.6 -- the old band reached ~1 cm past
+                         # the knuckles and bridged the distal phalanges;
+                         # fusion now stays proximal like a real web)
+THUMB_WEB_K = 0.35       # thumb<->index web uses a wider blend
+                         # (v5: 0.50 -> 0.35 -- the old k filled the thenar
+                         # groove completely; the web stays, a groove reads)
 THUMB_WEB_FRAC = 0.40    # ... extending over this fraction of proximal
 
 K_INTRA = 0.05           # within one finger: near-hard union
@@ -251,7 +271,11 @@ K_BODY = 0.30            # forearm/palm ellipsoid chain
 GRID_STEP = 0.15         # Deviation (H6): 0.12 -> 0.15, SDF ~3s not ~7s
 GRID_Y0 = -24.0          # fixed proximal border (stub pole closes inside)
 TRIS_MAX = 8000
-HANDMESH_VERSION = "v4"  # v4: thumb MCP base matches the rig (was /hf off),
+HANDMESH_VERSION = "v5"  # v5: distal taper (FING_R_TAPER on DIP/tip) opens
+                         # inter-finger gaps past the knuckles; WEB_Y_HI
+                         # 1.2 -> 0.6 keeps the webbing proximal. Proximal
+                         # radii/grading (gap50, pip_spacing) unchanged.
+                         # v4: thumb MCP base matches the rig (was /hf off),
                          # rest_chains coupling 0.4 -> REST_DIP_RATIO 0.65.
                          # v3: SDF v2 (elliptical sections, pad tips, y-web)
 
@@ -312,7 +336,7 @@ def geom_hash():
     coupling change reuses the unchanged REST_DIP_RATIO value, so the hash
     alone rebuilt nothing).
     """
-    rep = repr((FINGER_SPECS, FING_R_SCALE, MCP_SHRINK, ARM_PROFILE,
+    rep = repr((FINGER_SPECS, FING_R_SCALE, FING_R_TAPER, MCP_SHRINK, ARM_PROFILE,
                 ARM_PIN, THENAR, HYPO, WEB_RADII, THUMB_CMC_A,
                 THUMB_CMC_LEN, THUMB_MCP_LEN, THUMB_IP_LEN,
                 THUMB_BASE_Y0, THUMB_FWD, HF_XXS,  # thumb-MCP forward shift
