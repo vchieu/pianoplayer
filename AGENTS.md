@@ -306,6 +306,12 @@ one-line warning). CLI/GUI flags unchanged.
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).
 - Fingering output: `articulations` (musescore-friendly) by default;
   `lyrics` with `-b/--below-beam`.
+- R0 IoU gate (`diag_ref_iou.py`, never asserts): needs local-only
+  `docs/ref_top.<jpg|png>` (user photo, `docs/ref_*` is gitignored) +
+  `docs/ref_mask.png` via `tools/make_ref_mask.py`. Baseline 2026-10-13:
+  **0.772** @rot=180 (chromatic-cluster pose) vs ≥ 0.85 target; gap is
+  personal slender proportion (photo bbox h/w 1.79 vs 1.64), not a mesh
+  defect -- R3 asset replacement deferred, see plan Deviations.
 
 ## Docs maintenance
 
