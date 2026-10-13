@@ -876,19 +876,26 @@ class HandRig:
             arr = numpy_to_vtk(rgb, deep=0)
             arr.SetName("RGB")
             mesh.dataset.GetPointData().SetScalars(arr)
-            mesh.mapper.SetColorModeToDirectScalars()
+            # NOTE: no SetColorModeToDirectScalars -- in this VTK build that
+            # mode disables texture sampling entirely (red-texture probe stays
+            # grey). Default MapScalars passes RGB uchar through directly and
+            # modulates with the texture.
             mesh.color((1.0, 1.0, 1.0) if _tex_ok else self.skin)
-            self._skin["blush"] = rgb
-            self._skin["blush_arr"] = arr
+            self._skin["blush"] = rgb  # VTK-shared (deep=0): ALWAYS update
+            self._skin["blush_np"] = rgb  # in place, never rebind (else the
+            self._skin["blush_arr"] = arr  # mesh keeps showing stale data)
             self._skin["blush_col"] = {}
             self._skin["blush_base"] = base255
             # R4: Store resting vertex colors (with AO + shading) for press restoration
             self._skin["blush_rest"] = self._skin["blush"].copy()
-            # R4: Apply baked AO to vertex colors (multiply into base)
+            # R4: Apply baked AO to vertex colors (multiply into base, in place
+            # so the VTK-shared array (deep=0) actually changes on screen).
             if "ao" in data:
                 ao = np.array(data["ao"], float)
                 # AO is in [0.75, 1.0], multiply into base color
-                self._skin["blush"] = (self._skin["blush"].astype(float) * ao[:, None]).astype(np.uint8)
+                self._skin["blush_np"][:] = np.clip(
+                    self._skin["blush_np"].astype(float) * ao[:, None],
+                    0.0, 255.0).astype(np.uint8)
                 self._skin["blush_arr"].Modified()
             # R4: Skin shading - pinker at joints/tips, lighter on dorsum, +-3% noise
             self._apply_skin_shading(rest32, nrm32, names, idx, w32)
@@ -1207,11 +1214,14 @@ class HandRig:
             noise = 1.0 + (rng.random(N) - 0.5) * 0.06
             shade *= noise[:, None]
             
-            # Apply shading (multiply)
-            rgb *= np.clip(shade, 0.85, 1.15)
-            
-            # Store back
-            S["blush"] = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+            # Apply shading (multiply, in place into the VTK-shared array)
+            rgb = S["blush_np"]
+            rgb[:] = np.clip(
+                rgb.astype(float) * np.clip(shade, 0.85, 1.15),
+                0, 255).astype(np.uint8)
+
+            # Store back (rest snapshot for press-release restore)
+            S["blush_rest"] = rgb.copy()
             S["blush_arr"].Modified()
             S["mesh"].actor.Modified()
         except Exception:
