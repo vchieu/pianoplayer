@@ -74,6 +74,12 @@ AUDIO_LOOKAHEAD = 1.0      # s of audio events handed to the synth in advance.
 BLACK_AIM = 0.45          # s before a black-key note the hand slides forward
 TAU_PRESS = 0.012         # key/finger easing while pressing [s]
 TAU_RELEASE = 0.032       # ... while releasing [s]
+# Visual press easing (TAU_PRESS) reaches ~63% at +12 ms while the audio
+# attack is ~4 ms, plus ~16 ms frame quantization: firing exactly at t_on
+# makes the sound feel ~20 ms early.  Fire presses PRESS_LEAD early so the
+# key/finger travel lands with the heard attack.  Audio scheduling
+# (AUDIO_LOOKAHEAD loop) and releases stay on true score time.
+PRESS_LEAD = 0.025        # press lead compensating visual travel time [s]
 HUD_PERIOD = 0.25         # s between HUD refreshes
 SUSTAIN_LEGATO = 0.15    # s a note rings longer when the next one overlaps
                          # it (simple sustain pedal, C8)
@@ -976,8 +982,9 @@ class VirtualKeyboard:
             p.aim += 1
         target = notes[p.aim] if p.aim < len(notes) else None
 
-        # presses due --------------------------------------------------------
-        while p.fire < len(notes) and notes[p.fire].t_on <= now:
+        # presses due (fired PRESS_LEAD early to compensate key/finger
+        # travel time; audio scheduling above stays on true score time) --
+        while p.fire < len(notes) and notes[p.fire].t_on <= now + PRESS_LEAD:
             e = notes[p.fire]
             p.fire += 1
             if not e.fired:

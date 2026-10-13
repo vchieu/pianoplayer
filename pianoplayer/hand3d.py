@@ -619,6 +619,7 @@ class HandRig:
         self._actors = []
         self._blob_actors = []    # H3: raw vtkActors sharing arm/finger data
         self._arm_blob = None     # ... (arm blob actor, matrix) or None
+        self._arm_blob2 = None    # compat: secondary layer removed (always None)
         self._skin = None         # Tier-B skinned mesh state (or None)
         self._skin_q = {}         # finger -> current q (4,3) world (skinned)
         self._skin_ms = 0.0       # last _update_skin cost [ms] (profiling)
@@ -946,6 +947,20 @@ class HandRig:
                 except ValueError:
                     pass
                 self._arm_blob = None
+            if getattr(self, "_arm_blob2", None) is not None:
+                try:
+                    _old2, _mat2 = self._arm_blob2
+                except Exception:
+                    _old2 = self._arm_blob2
+                try:
+                    _old2.SetVisibility(0)
+                except Exception:
+                    pass
+                try:
+                    self._blob_actors.remove(_old2)
+                except (ValueError, TypeError):
+                    pass
+                self._arm_blob2 = None
             self._add_blob(mesh.dataset)
             self._blob_world = True
         except Exception:
@@ -1240,8 +1255,9 @@ class HandRig:
         so their own opaque shadow would cap the fingertip black, and their
         transparent one veils the hand (see _SHADOW_* notes).  Silently
         skipped when raw vtk actors are unavailable.
-        
-        R4: Adds a second blurred layer (alpha 0.15) for softer shadows.
+
+        Single opaque layer only: a translucent second layer composites
+        grey over the hands (transparent-behind-opaque) and must not return.
         """
         if vtkActor is None or vtkPolyDataMapper is None:
             return
@@ -1262,24 +1278,8 @@ class HandRig:
             self._arm_blob = (actor, mat)
             actor.SetUserMatrix(mat)
             self._blob_actors.append(actor)
-            
-            # R4: Secondary blurred shadow layer (alpha 0.15, slightly offset)
-            mapper2 = vtkPolyDataMapper()
-            mapper2.SetInputData(pd)
-            mapper2.SetScalarVisibility(False)
-            actor2 = vtkActor()
-            actor2.SetMapper(mapper2)
-            actor2.GetProperty().SetColor(*_SHADOW_COL)
-            actor2.GetProperty().SetOpacity(0.15)
-            try:
-                actor2.GetProperty().LightingOff()
-            except Exception:
-                pass
-            mat2 = vtkMatrix4x4()
-            mat2.Identity()
-            self._arm_blob2 = (actor2, mat2)
-            actor2.SetUserMatrix(mat2)
-            self._blob_actors.append(actor2)
+            # Compat: secondary blurred layer removed; keep attr as None.
+            self._arm_blob2 = None
         except Exception:
             pass
 
@@ -1306,39 +1306,6 @@ class HandRig:
             mat.SetElement(2, 3, _SHADOW_Z)
             mat.Modified()
             actor.Modified()
-            # R4: Update second blurred shadow layer (slightly offset for blur effect)
-            if self._arm_blob2:
-                actor2, mat2 = self._arm_blob2
-                # Slightly offset the projection for blur effect
-                if self._blob_world:
-                    mat2.SetElement(0, 0, 1.0)
-                    mat2.SetElement(0, 1, 0.0)
-                    mat2.SetElement(0, 2, 0.0)
-                    mat2.SetElement(0, 3, _SHADOW_OFF[0] + 0.15)
-                    mat2.SetElement(1, 0, 0.0)
-                    mat2.SetElement(1, 1, 1.0)
-                    mat2.SetElement(1, 2, 0.0)
-                    mat2.SetElement(1, 3, _SHADOW_OFF[1] + 0.15)
-                    mat2.SetElement(2, 0, 0.0)
-                    mat2.SetElement(2, 1, 0.0)
-                    mat2.SetElement(2, 2, 0.0)
-                    mat2.SetElement(2, 3, _SHADOW_Z + 0.05)
-                else:
-                    r0, r1 = R[0], R[1]
-                    mat2.SetElement(0, 0, r0[0])
-                    mat2.SetElement(0, 1, r0[1])
-                    mat2.SetElement(0, 2, r0[2])
-                    mat2.SetElement(0, 3, t[0] + _SHADOW_OFF[0] + 0.15)
-                    mat2.SetElement(1, 0, r1[0])
-                    mat2.SetElement(1, 1, r1[1])
-                    mat2.SetElement(1, 2, r1[2])
-                    mat2.SetElement(1, 3, t[1] + _SHADOW_OFF[1] + 0.15)
-                    mat2.SetElement(2, 0, 0.0)
-                    mat2.SetElement(2, 1, 0.0)
-                    mat2.SetElement(2, 2, 0.0)
-                    mat2.SetElement(2, 3, _SHADOW_Z + 0.05)
-                mat2.Modified()
-                actor2.Modified()
             return
         r0, r1 = R[0], R[1]
         mat.SetElement(0, 0, r0[0])

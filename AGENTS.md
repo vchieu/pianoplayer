@@ -241,7 +241,9 @@ ties included) and converted to seconds through `tempo_map`
 correct, and tempo changes are integrated piecewise). With no map, the
 constant `tempo` is used. While a finger holds a key, that finger stays
 exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
-the next note.
+the next note. Visual presses fire `PRESS_LEAD = 0.025` s early so the
+key/finger travel lands with the heard attack (audio scheduling stays on
+true score time); each hand carries a single opaque blob shadow.
 
 ## Unified skinned hand mesh (Tier B, v2.6.0)
 
