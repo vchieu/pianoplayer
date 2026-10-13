@@ -94,6 +94,8 @@ _ROOT_REACH_FRAC = _HS.ROOT_REACH_FRAC  # MCP standoff as fraction of
 _ROOT_Z_BASE = _HS.ROOT_Z_BASE  # ROOT_Z = BASE * (C0 + K*hf); tuned from
 _ROOT_Z_C0 = _HS.ROOT_Z_C0      #   2.3 * (0.6 + 0.4*hf): lower for small hands
 _ROOT_Z_HF_K = _HS.ROOT_Z_HF_K  #   (dz dominates), higher for large (bend room)
+_ROOT_Z_ARCH = _HS.ROOT_Z_ARCH  # arch dome for larger hands only (small-hand
+                                # solver fails from a high wrist: bend=0)
 # D1b: the thumb MCP sits progressively further forward as the hand grows;
 # without this the thumb cannot reach either key colour at L/XL/XXL while the
 # middle finger must not over-fold (same root serves both).
@@ -593,8 +595,9 @@ class HandRig:
         finger_len = sum(_SPECS[3]["lens"]) * self.hf
         self.ROOT_Y = (_ROOT_CONTACT_Y - _ROOT_WRIST_GAP * self.hf
                        - _ROOT_REACH_FRAC * finger_len)
-        self.ROOT_Z = _ROOT_Z_BASE * (_ROOT_Z_C0
+        self.ROOT_Z = (_ROOT_Z_BASE * (_ROOT_Z_C0
                                       + _ROOT_Z_HF_K * self.hf)
+                         + _ROOT_Z_ARCH * max(0.0, self.hf - 0.5))
         # D1b: thumb MCP forward shift (world cm, progressive with size).
         self._thumb_by = max(_THUMB_BASE_Y0,
                              _THUMB_BASE_Y0 + _THUMB_FWD * (self.hf - _HF_XXS))

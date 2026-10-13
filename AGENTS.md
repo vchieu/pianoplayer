@@ -204,7 +204,8 @@ around the wrist (`0.4 * atan2(root_x - shoulder_x, 45)`, clamped
 ±0.10 rad, plus velocity yaw clamped ±0.05).
 
 Root follows hand size: `ROOT_Y`/`ROOT_Z` scale with `hf` (reach fraction
-0.69, `ROOT_Z = 2.0*(0.50+0.60*hf)`, `BLACK_SHIFT = 1.15`), the thumb MCP
+0.69, `ROOT_Z = 2.0*(0.50+0.60*hf) + 1.0*max(0,hf-0.5)` arch dome for larger
+hands only -- small-hand IK fails from a high wrist, `BLACK_SHIFT = 1.15`), the thumb MCP
 moves forward with `hf` (`THUMB_BASE_Y0 = 3.55`, `THUMB_FWD = 4.4`, thumb
 contact 0.65 cm nearer the player) and the pinky contact retreats 0.80 cm
 (`_PINKY_CONTACT_DY`). All geometry lives in `handspec.py` (single source:

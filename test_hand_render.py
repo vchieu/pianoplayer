@@ -73,6 +73,14 @@ def shot(name, views, rigs, focus=(52, -6, 3)):
         build_keys(plt)
         for r in rigs:
             r.add_to(plt)
+            # Blob shadows are a top-down projection trick: from the side
+            # they float as ghosts/veils (one actor even lands in the sky).
+            # Mirror vkeyboard.toggle_view: show only for top-down.
+            if view in ("side", "persp"):
+                try:
+                    r.set_shadows_visible(False)
+                except Exception:
+                    pass
         plt.camera = dict(pos=pos, focalPoint=focal, viewup=up)
         plt.render()
         path = os.path.join(OUT, "%s_%s.png" % (name, view))

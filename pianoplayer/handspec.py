@@ -33,15 +33,15 @@ FINGER_NAMES = {1: "thumb", 2: "index", 3: "middle", 4: "ring", 5: "little"}
 # articulation (R5.3, deferred -- see Deviations).
 FINGER_SPECS = {
     1: dict(base=(-5.6, 3.0, 0.45), lens=(3.2, 2.2, 1.9),
-            radii=(1.06, 0.96, 0.83, 0.70), pole=(0.15, 0.55, 1.00)),
+            radii=(1.06, 0.96, 0.83, 0.60), pole=(0.15, 0.55, 1.00)),
     2: dict(base=(-2.1, 8.2, 1.85), lens=(3.9, 2.5, 2.0),
-            radii=(0.96, 0.89, 0.77, 0.65), pole=(0.00, 0.35, 1.00)),
+            radii=(0.96, 0.89, 0.77, 0.55), pole=(0.00, 0.35, 1.00)),
     3: dict(base=(0.15, 8.6, 1.95), lens=(4.3, 2.7, 2.1),
-            radii=(0.98, 0.91, 0.79, 0.66), pole=(0.00, 0.35, 1.00)),
+            radii=(0.98, 0.91, 0.79, 0.56), pole=(0.00, 0.35, 1.00)),
     4: dict(base=(2.4, 8.3, 1.80), lens=(3.9, 2.5, 2.0),
-            radii=(0.93, 0.86, 0.74, 0.62), pole=(0.00, 0.35, 1.00)),
+            radii=(0.93, 0.86, 0.74, 0.53), pole=(0.00, 0.35, 1.00)),
     5: dict(base=(4.5, 8.1, 1.60), lens=(3.2, 2.1, 1.8),
-            radii=(0.86, 0.79, 0.68, 0.57), pole=(0.00, 0.30, 1.00)),
+            radii=(0.86, 0.79, 0.68, 0.48), pole=(0.00, 0.30, 1.00)),
 }
 
 # visual finger-width multiplier (IK only uses lens, so reach is untouched).
@@ -159,6 +159,13 @@ ROOT_CONTACT_Y = -3.0
 ROOT_WRIST_GAP = 8.6
 ROOT_REACH_FRAC = 0.69
 ROOT_Z_BASE = 2.0
+ROOT_Z_ARCH = 1.0          # extra arch lift, only above hf 0.5: small hands
+                           # (short fingers) cannot reach down from a high
+                           # wrist (solver returns bend=0, 23 cells fail at
+                           # flat +50%); large hands get the full dome.
+                           # 2.0 adds M-thumb-black + L/XL-pinky fails, so
+                           # 1.0 (M +0.32): no NEW fails vs 67/70 baseline.
+                           # ROOT_Z = BASE*(C0+K*hf) + ARCH*max(0,hf-0.5).
 ROOT_Z_C0 = 0.50
 ROOT_Z_HF_K = 0.60
 THUMB_BASE_Y0 = 3.55
@@ -207,19 +214,23 @@ WEB_POS_Z = 0.70
 # joint angles as input) -- they pin the intent and feed geom_hash() so
 # retuning them rebuilds the cache. Do not fake-wire them.
 # --------------------------------------------------------------------------- #
-REST_MCP_DEG = 20.0      # target MCP flexion of the rest pose (hash only)
-REST_PIP_DEG = 35.0      # target PIP flexion of the rest pose (hash only)
+REST_MCP_DEG = 30.0      # target MCP flexion of the rest pose (hash only)
+REST_PIP_DEG = 45.0      # target PIP flexion of the rest pose (hash only)
 REST_DIP_RATIO = 0.65    # DIP = 0.65 x PIP (wired: solve_chain coupling)
 REST_SPREAD = 0.30       # lateral splay per finger step (x hf)
-REST_REACH_FRAC = 0.92   # rest target distance as a fraction of chain length
-REST_LIFT_Z = 0.15       # rest target lift above the MCP plane (x hf)
+REST_REACH_FRAC = 0.85   # rest target distance as a fraction of chain length
+                         # (0.92 -> 0.85: folded dome, not a flat paddle)
+REST_LIFT_Z = 0.45       # rest target lift above the MCP plane (x hf)
+                         # (0.15 -> 0.45: knuckle dome like a playing hand)
 
 # --------------------------------------------------------------------------- #
 # SDF v2 section parameters
 # --------------------------------------------------------------------------- #
 FING_Z_FLAT = (0.88, 0.84, 0.80)  # z-radius scale per segment (elliptical)
 TIP_PAD_FLAT = 0.72      # fingertip pad ellipsoid flattening (z)
-PIP_MOUND = 1.06         # PIP joint sphere radius multiplier
+PIP_MOUND = 1.03         # PIP joint sphere radius multiplier (was 1.06: the
+                         # near-hard union groove rendered as a dark zigzag
+                         # crack under side light; DIP already 1.03)
 DIP_MOUND = 1.03         # DIP joint sphere radius multiplier
 MCP_MOUND_R = 0.55       # MCP mound sphere radius as a fraction of spacing
 PALM_ARCH = 0.18         # dorsal arch height factor (z(x) curve) --

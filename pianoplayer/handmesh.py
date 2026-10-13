@@ -1032,6 +1032,26 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
             joints[f] = (np.asarray(a, float), np.asarray(b, float),
                          np.asarray(b1, float))
             tips[f] = np.asarray(b2, float)
+    # metacarpal tendon valleys: soft dark longitudinal lines on the dorsum
+    # between the finger bases (the sample photo shows clear tendon shading;
+    # flat tone noise cannot produce it). Positions from the MCP bases.
+    try:
+        mcps = [joints[f][0] for f in (2, 3, 4, 5) if f in joints]
+        if len(mcps) == 4:
+            xs = sorted([float(m[0]) for m in mcps])
+            y1 = max(float(m[1]) for m in mcps)
+            y0 = y1 - 8.0 * float(hf)
+            for xa, xb in zip(xs, xs[1:]):
+                xm = 0.5 * (xa + xb)
+                x0, yy0 = to_px(xm, y0)
+                x1, yy1 = to_px(xm, y1)
+                for dx, col in ((-2, (150, 100, 90, 34)),
+                                (0, (150, 100, 90, 44)),
+                                (2, (150, 100, 90, 34))):
+                    dr.line([(x0 + dx, yy0), (x1 + dx, yy1)],
+                            fill=col, width=4)
+    except Exception:
+        pass
     # joint-crease bands (~12% dark + light ridge) across each finger u-span
     for f, (qm, qp, qd) in joints.items():
         r = 0.95 * float(hf)
@@ -1054,15 +1074,16 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
     # nails: pinkish ellipse with a whiter tip + cuticle arc (R4: boost contrast)
     for f, t in tips.items():
         try:
-            r = 0.62 * float(hf)
+            r = 0.50 * float(hf)
             x0, y0 = to_px(t[0] - r, t[1] - 1.15 * float(hf))
             x1, y1 = to_px(t[0] + r, t[1] - 0.10 * float(hf))
             # Base nail color (within 8% of skin tone)
             skin_r, skin_g, skin_b = 247, 209, 189  # base skin-ish
             # Brighter rim (lunula area) - 8% lighter
             rim_r, rim_g, rim_b = min(255, int(skin_r * 1.08)), min(255, int(skin_g * 1.08)), min(255, int(skin_b * 1.08))
-            # Whiter tip - 6% lighter than rim
-            tip_r, tip_g, tip_b = min(255, int(rim_r * 1.06)), min(255, int(rim_g * 1.06)), min(255, int(rim_b * 1.06))
+            # Whiter tip - 3% lighter than rim (was 6%: blew out to white
+            # blobs on curled fingertips in side views)
+            tip_r, tip_g, tip_b = min(255, int(rim_r * 1.03)), min(255, int(rim_g * 1.03)), min(255, int(rim_b * 1.03))
             # Cuticle - 10% darker
             cut_r, cut_g, cut_b = int(skin_r * 0.9), int(skin_g * 0.9), int(skin_b * 0.9)
             
