@@ -28,6 +28,8 @@ python test_review_fixes.py   # review-fix acceptance: cache persistence, t_sec,
 python eval_fingering.py      # fingering quality gates (gold + PIG + F1-F3 + aim; C arpeggio R is XFAIL)
 python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend, offscreen
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
+python test_falling.py        # falling-note geometry (numpy only, no window)
+python test_repeat_notes.py   # repeated same-pitch notes visibly release key/finger (no window)
 ```
 
 There is no linter, formatter, CI config, or pyproject; `setup.py` is the only
@@ -45,6 +47,7 @@ build manifest.
 | `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
+| `pianoplayer/falling.py` | Synthesia-style falling notes: pure numpy bar/digit geometry + VTK `FallingNotes` layer |
 | `pianoplayer/utils.py` | Keyboard geometry, note-name helpers, shared constants |
 | `pianoplayer/wavegenerator.py` | Legacy simpleaudio chord player (deprecated) |
 
@@ -250,6 +253,19 @@ exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
 the next note. Visual presses fire `PRESS_LEAD = 0.025` s early so the
 key/finger travel lands with the heard attack (audio scheduling stays on
 true score time); each hand carries a single opaque blob shadow.
+Repeated same-pitch notes get a visual release `v_off` earlier than the audio
+`t_off` (`_apply_visual_release`), so the key and the finger visibly rise
+between re-strikes while the sound keeps its full length.
+
+**Falling notes** (`pianoplayer/falling.py`, `FallingNotes` in `vkeyboard.py`):
+Synthesia-style bars fall from the top of the window and touch the landing
+line `HIT_Y` (top edge of the fall-line box) exactly at `t_on`; bar length
+follows `v_off`, abutting bars stay `BAR_GAP` apart. Bars are visible
+`FALL_SECONDS` (2.2 s) ahead, so `LEAD_IN = max(0.8, FALL_SECONDS + 0.2)`.
+Digits 1-5 are flat quad geometry (not Text3D/texture) at the bottom of each
+bar. Fixed-capacity meshes, numpy-view writes + `Modified()` per frame, any
+error disables the layer, never playback. Disable with
+`PIANOPLAYER_FALLING=0`.
 
 ## Unified skinned hand mesh (Tier B, v2.6.0)
 
@@ -315,8 +331,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.6.0'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.6.0"`).
+  `setup.py` (`version='2.8.0'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.8.0"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

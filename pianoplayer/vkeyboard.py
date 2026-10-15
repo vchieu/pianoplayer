@@ -42,6 +42,7 @@ except Exception:  # pragma: no cover
 
 from pianoplayer import __version__
 from pianoplayer.audio import SoundEngine, midi_from_name, midi_of
+from pianoplayer.falling import FALL_SECONDS, FallingNotes
 from pianoplayer.hand3d import FINGERS, HandRig
 from pianoplayer.utils import (
     BLACK_KEY_PRESS_ANGLE,
@@ -63,7 +64,7 @@ __all__ = ["VirtualKeyboard"]
 NR_OCTAVES = 7
 KEY_TOL = 0.12
 FPS_MS = 16               # animation period [ms]
-LEAD_IN = 0.8             # s before the first note: hands settle in place
+LEAD_IN = max(0.8, FALL_SECONDS + 0.2)             # s before the first note: hands settle in place
 AIM_LEAD = 0.25           # s ahead at which the hand aims at the next note
 AUDIO_LOOKAHEAD = 1.0      # s of audio events handed to the synth in advance.
                           # Must cover device period + mixer (0.08), the primed
@@ -83,6 +84,8 @@ PRESS_LEAD = 0.025        # press lead compensating visual travel time [s]
 HUD_PERIOD = 0.25         # s between HUD refreshes
 SUSTAIN_LEGATO = 0.15    # s a note rings longer when the next one overlaps
                          # it (simple sustain pedal, C8)
+VIS_LIFT = 0.045          # s the key/finger must visibly rise before a re-strike
+MIN_PRESS_VIS = 0.02      # s a note stays visibly pressed at the very least
 
 KEY_WHITE = (0.94, 0.94, 0.91)
 KEY_BLACK = (0.055, 0.055, 0.065)
@@ -181,13 +184,14 @@ def _write_key_matrix(m4, amount, black):
 # per note / per hand bookkeeping
 # --------------------------------------------------------------------------- #
 class _Ev:
-    __slots__ = ("t_on", "t_off", "midi", "vel", "finger", "black",
+    __slots__ = ("t_on", "t_off", "v_off", "midi", "vel", "finger", "black",
                  "measure", "name", "fx", "key", "fired", "wx", "_sent_when")
 
     def __init__(self, t_on, t_off, midi, vel, finger, black, measure,
                  name, fx, wx=None):
         self.t_on = t_on
         self.t_off = t_off
+        self.v_off = t_off          # when the *visual* key/finger lets go
         self.midi = midi
         self.vel = vel
         self.finger = finger        # 1..5, 0 = unknown/unused
@@ -199,6 +203,30 @@ class _Ev:
         self.key = None             # 3D key mesh name, filled on press
         self.fired = False
         self._sent_when = None      # engine time handed to note_on (F10 fix)
+
+
+def _apply_visual_release(evs):
+    """Make a re-struck key/finger visibly rise between two strikes.
+
+    Sets `v_off` (visual release time; `t_off` stays the audio time).
+    """
+    for attr in ("midi", "finger"):
+        groups = {}
+        for e in evs:
+            g = getattr(e, attr)
+            if g is None or (attr == "finger" and not g):
+                continue
+            groups.setdefault(g, []).append(e)
+        for lst in groups.values():
+            lst.sort(key=lambda e: e.t_on)
+            for a, b in zip(lst, lst[1:]):
+                gap = b.t_on - a.t_on
+                if gap < 0.05:
+                    continue            # chord mates / grace clusters
+                lift = min(VIS_LIFT, 0.40 * gap)
+                limit = b.t_on - PRESS_LEAD - lift
+                floor = a.t_on - PRESS_LEAD + MIN_PRESS_VIS
+                a.v_off = min(a.v_off, max(limit, floor))
 
 
 class _Player:
@@ -252,6 +280,8 @@ class VirtualKeyboard:
         # The shadow frustum is fitted to the scene, on wide screens some
         # surfaces fall outside it and turn black, so it is off by default.
         self.shadows = bool(shadows)
+        self.falling = os.environ.get("PIANOPLAYER_FALLING", "1") != "0"
+        self._fall = None
         self.vp = None
         self.rightHand = None
         self.leftHand = None
@@ -472,6 +502,19 @@ class VirtualKeyboard:
         except Exception:
             pass
         self.vp += fall
+
+        self._fall = None
+        if getattr(self, "falling", True):
+            try:
+                self._fall = FallingNotes(
+                    self.vp, top_y=cy + pscale,
+                    x_of=lambda e: _key_x(e.midi) if e.midi is not None else e.wx,
+                    accent_r=ACCENT_R, accent_l=ACCENT_L, key_w=KEY_WB,
+                    white_w=KEY_WB - KEY_TOL - 0.25,
+                    black_w=KEY_WB * 0.6 - 0.1)
+            except Exception as exc:     # no falling layer beats no player
+                print("falling notes disabled:", exc)
+                self._fall = None
 
         # the 88 keys, A0 .. C8 --------------------------------------------
         black_pc = (1, 3, 6, 8, 10)       # C# D# F# G# A#
@@ -752,6 +795,8 @@ class VirtualKeyboard:
                 nxt[e.midi] = e.t_on
         for e in evs:
             e.t_off = max(e.t_off, e.t_on + 0.06)
+            e.v_off = e.t_off
+        _apply_visual_release(evs)
         return evs
 
     # -------------------------------------------------------------------- play
@@ -848,6 +893,9 @@ class VirtualKeyboard:
             self._players[side] = p
             if p.notes[0].fx:
                 rig.settle(p.notes[0].fx, {})
+
+        if getattr(self, "_fall", None) is not None:
+            self._fall.reset()
 
         self._stop_audio()
         engine_wall = _time.perf_counter()
@@ -996,7 +1044,7 @@ class VirtualKeyboard:
         i = 0
         while i < len(p.held):
             e = p.held[i]
-            if e.t_off <= now:
+            if e.v_off <= now:
                 self._release(p, e)
                 p.held.pop(i)
             else:
@@ -1132,6 +1180,14 @@ class VirtualKeyboard:
                          aim_fingers=p.aim_fingers)
 
         self._sync_keys(dt)
+        fall = getattr(self, "_fall", None)
+        if fall is not None:
+            try:
+                fall.update(now, self._players.values())
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                self._fall = None        # never let a cosmetic layer kill playback
         self._hud_update(now)
         self._progress(now)
 

@@ -142,7 +142,17 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   mesh + skinning-weight set is cached, so a warm start loads in ~40 ms
   instead of rebuilding); skinning runs in ~2.7 ms/frame per hand;
 - **keys dip** on their hinge when a finger presses them, and flash with an
-  orange (right hand) or violet (left hand) accent;
+  orange (right hand) or violet (left hand) accent; repeated same-pitch
+  notes get a visual release `v_off` earlier than the audio `t_off`, so the
+  key and the finger visibly rise between re-strikes while the sound keeps
+  its full length;
+- **falling notes** (`pianoplayer/falling.py`): Synthesia-style bars fall
+  from the top of the window and touch the landing line `HIT_Y` exactly at
+  `t_on`; bars are visible `FALL_SECONDS` (2.2 s) ahead, so
+  `LEAD_IN = max(0.8, FALL_SECONDS + 0.2)`; every bar carries its finger
+  number 1-5 as flat quad geometry (not Text3D/texture). Disable with
+  `PIANOPLAYER_FALLING=0`. Geometry is covered by `test_falling.py` and
+  the repeat release by `test_repeat_notes.py`;
 - **tempo comes from the score**: every note - including chords - sounds at
   its exact onset time, tempo marks with any referent (eighth = 120,
   dotted quarter = 60, ...) are interpreted correctly and tempo changes
