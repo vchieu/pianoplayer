@@ -13,9 +13,7 @@ test_hand_render/
 test_play_out/
 test_shadow_out.png
 hand_look_out/
-PIANOPLAYER_FIX_PLAN.md
-PIANOPLAYER_HAND_LOOK_PLAN.md
-PIANOPLAYER_HUMAN_HAND_PLAN.md
+PIANOPLAYER_*.md
 diag_handmesh_out/
 docs/ref_*
 docs/sample-*

@@ -7,8 +7,9 @@
     F major scale right hand 1 2 3 4 1 2 3 4;
     C major arpeggio right hand 1 2 3 5 1 2 3 5.
 (b) PIG dataset (PianoFingeringDataset, expert fingerings, NOT redistributed):
-    give a .txt file or a directory; prints the per-piece best-match rate
-    and the average. Notes without an expert number ('_' in PIG) are skipped.
+    give a .txt file or a directory; prints the per-piece note-weighted
+    average match rate over both hands (via pigloader.load_pig, chords
+    included) and the average. Notes without an expert number are skipped.
 
 (c) F1-F3 acceptance checks: tempo dependence (60 vs 200 bpm cost tables
     differ, gold passes at both), repeated-note alternation (16ths at 120
@@ -43,6 +44,7 @@ from pianoplayer.hand import (
     Hand,
     _dt_sec,
 )
+from pianoplayer.pigloader import load_pig
 from pianoplayer.scorereader import PIG2Stream, reader
 from pianoplayer.utils import score_tempo_map
 
@@ -91,6 +93,53 @@ GOLD = [
     ("C arpeggio R", ["C4", "E4", "G4", "C5", "E5", "G5", "C6", "E6"],
      "right", [1, 2, 3, 5, 1, 2, 3, 5]),
 ]
+
+
+# ------------------------------------------------------------- gold extra -- #
+# Phase 0 step 0.2: extended gold table. INFORMATIONAL ONLY: printed as a
+# percentage, never fails the run. Textbook patterns, NOT pianist-checked:
+# a human must confirm each row before it is promoted into GOLD.
+GOLD_EXTRA = [
+    ("D scale R", ["D4", "E4", "F#4", "G4", "A4", "B4", "C#5", "D5"],
+     "right", [1, 2, 3, 1, 2, 3, 4, 5]),
+    ("A scale R", ["A4", "B4", "C#5", "D5", "E5", "F#5", "G#5", "A5"],
+     "right", [1, 2, 3, 1, 2, 3, 4, 5]),
+    ("E scale R", ["E4", "F#4", "G#4", "A4", "B4", "C#5", "D#5", "E5"],
+     "right", [1, 2, 3, 1, 2, 3, 4, 5]),
+    ("D scale L", ["D3", "E3", "F#3", "G3", "A3", "B3", "C#4", "D4"],
+     "left", [5, 4, 3, 2, 1, 3, 2, 1]),
+    ("A scale L", ["A2", "B2", "C#3", "D3", "E3", "F#3", "G#3", "A3"],
+     "left", [5, 4, 3, 2, 1, 3, 2, 1]),
+    ("E scale L", ["E3", "F#3", "G#3", "A3", "B3", "C#4", "D#4", "E4"],
+     "left", [5, 4, 3, 2, 1, 3, 2, 1]),
+    ("C 2oct R", ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5",
+                  "D5", "E5", "F5", "G5", "A5", "B5", "C6"],
+     "right", [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5]),
+    ("C 2oct L", ["C3", "D3", "E3", "F3", "G3", "A3", "B3", "C4",
+                  "D4", "E4", "F4", "G4", "A4", "B4", "C5"],
+     "left", [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]),
+    ("Chromatic R (12 notes)",
+     ["C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4"],
+     "right", [1, 3, 1, 3, 1, 1, 3, 1, 3, 1, 3, 1]),
+]
+
+
+def test_gold_extra():
+    """Phase 0 step 0.2: extended gold patterns, informational only.
+
+    Prints got/want per row and the match percentage; returns without
+    failing. Percentages are recorded in docs/fingering_baseline.txt.
+    """
+    match = 0
+    for label, names, side, want in GOLD_EXTRA:
+        got, _h = solve(names, side)
+        ok = list(got) == list(want)
+        match += ok
+        print("   gold-extra %-22s %s: got %s want %s" % (
+            label, "OK " if ok else "--", list(got), list(want)))
+    print("   gold-extra: %d/%d exact (%.1f%%)"
+          % (match, len(GOLD_EXTRA), 100.0 * match / len(GOLD_EXTRA)))
+    return
 
 
 def test_gold():
@@ -144,26 +193,31 @@ def _pig_experts(part):
 
 
 def pig_match_rate(fname):
-    """Best-match rate over both hands of one PIG file (0..1, None if void)."""
-    rates, known_total = [], 0
-    for beam, side in ((0, "right"), (1, "left")):
-        try:
-            part = PIG2Stream(fname, beam)
-        except Exception as exc:
-            print("   PIG %s beam %d unreadable: %s" % (fname, beam, exc))
-            continue
-        experts = _pig_experts(part)
+    """Note-weighted average match rate over both hands of one PIG file.
+
+    Uses pigloader.load_pig (chords included, one group per onset).
+    Returns (avg, per_hand) with per_hand = {"right": r or None,
+    "left": r or None}; avg is None when no hand has a known expert.
+    """
+    try:
+        data = load_pig(fname)
+    except Exception as exc:
+        print("   PIG %s unreadable: %s" % (fname, exc))
+        return None, {}
+    per_hand, match_total, known_total = {}, 0, 0
+    for channel, side in ((0, "right"), (1, "left")):
+        inotes, experts = data[channel]
         if not any(e is not None for e in experts):
+            per_hand[side] = None
             continue
-        s = stream.Score()
-        s.insert(0, part)
         h = Hand(side, "M")
         h.verbose = False
         try:
-            h.noteseq = reader(s, beam=0, tempo_map=score_tempo_map(s))
+            h.noteseq = inotes
             h.generate()
         except Exception as exc:
             print("   PIG %s %s solve failed: %s" % (fname, side, exc))
+            per_hand[side] = None
             continue
         got = [n.fingering for n in h.noteseq]
         n = min(len(got), len(experts))
@@ -173,13 +227,12 @@ def pig_match_rate(fname):
                 continue
             known += 1
             match += (g == e)
+        per_hand[side] = (match / known) if known else None
+        match_total += match
         known_total += known
-        if known:
-            rates.append(match / known)
     if not known_total:
-        return None
-    # best match over hands (a piece may be annotated for one hand only)
-    return max(rates) if rates else None
+        return None, per_hand
+    return match_total / known_total, per_hand
 
 
 def test_pig():
@@ -196,11 +249,18 @@ def test_pig():
     rates = []
     for fn in files:
         r = pig_match_rate(fn)
-        if r is None:
+        avg = r[0] if isinstance(r, tuple) else r
+        per = r[1] if isinstance(r, tuple) else {}
+        if avg is None:
             print("   PIG %-40s no known experts" % os.path.basename(fn))
             continue
-        rates.append(r)
-        print("   PIG %-40s %.1f%%" % (os.path.basename(fn), 100.0 * r))
+        rates.append(avg)
+        print("   PIG %-40s %.1f%% (R %s L %s)"
+              % (os.path.basename(fn), 100.0 * avg,
+                 ("%.1f%%" % (100.0 * per["right"])
+                  if per.get("right") is not None else "--"),
+                 ("%.1f%%" % (100.0 * per["left"])
+                  if per.get("left") is not None else "--")))
     if rates:
         print("   PIG average over %d pieces: %.1f%%"
               % (len(rates), 100.0 * sum(rates) / len(rates)))
@@ -334,7 +394,7 @@ def main():
     global FAILS
     t0 = time.perf_counter()
     # PIG first (informational even when gold fails), then the hard gates.
-    tests = [test_pig, test_gold, test_tempo_dependence,
+    tests = [test_pig, test_gold, test_gold_extra, test_tempo_dependence,
              test_repeat_alternation, test_same_finger_over_time,
              test_aim_fingers]
     for t in tests:

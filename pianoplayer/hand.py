@@ -80,8 +80,6 @@ class Hand:
         self.hf = utils.handSizeFactor(size)
         for i in (1,2,3,4,5):
             if self.frest[i]: self.frest[i] *= self.hf
-        print('Your hand span set to size-'+size, 'which is', 21*self.hf, 'cm')
-        print('(max relaxed distance between thumb and pinkie)')
         self.cfps = list(self.frest) # hold current finger positions
 
 
@@ -124,7 +122,8 @@ class Hand:
     #####################################################
     def _span_cost(self, fa, fb, span_cm):
         """F4a: quadratic cost up to COMFORT_SPAN, then steeper up to MAX_SPAN,
-        HARD beyond.  span_cm is at current hand size (already scaled by hf)."""
+        HARD beyond.  span_cm is the RAW keyboard distance in cm (never
+        multiplied by hf); the limits are scaled by hf."""
         if fa == fb:
             return HARD
         # Order fingers so fa < fb for lookup (MAX_SPAN is symmetric)
@@ -146,7 +145,7 @@ class Hand:
             for j, (fb, nb) in enumerate(zip(fingers, notes)):
                 if i >= j:
                     continue
-                span_cm = abs(nb.x - na.x) * self.hf
+                span_cm = abs(nb.x - na.x)
                 cost += self._span_cost(fa, fb, span_cm)
             # F6: static black/white preference
             if na.isBlack:
@@ -187,7 +186,7 @@ class Hand:
     def _chord_span_ok(self, fings, chord_notes):
         """True when every adjacent pair of the chord fits MAX_SPAN."""
         for i in range(len(fings) - 1):
-            span_cm = abs(chord_notes[i + 1].x - chord_notes[i].x) * self.hf
+            span_cm = abs(chord_notes[i + 1].x - chord_notes[i].x)
             if self._span_cost(fings[i], fings[i + 1], span_cm) >= HARD:
                 return False
         return True
@@ -287,7 +286,6 @@ class Hand:
             if na.isBlack and not nb.isBlack:
                 base *= 0.5
         # Thumb-over: fa == 1 (fa is thumb, fb passes over) - rare
-        # Thumb-over: fa == 1 (fa is thumb, fb passes over) - rare
         elif fa == 1 and fb > 1:
             base = _HS.UNDER.get(fb, 2.0)
             if not na.isBlack:
@@ -297,12 +295,11 @@ class Hand:
             a, b = (fa, fb) if fa < fb else (fb, fa)
             base = _HS.CROSS_BASE.get((a, b), 1.5)
         # Scale by interval (semitones) and inverse time
-        semitones = 0
-        if hasattr(na, 'midi') and hasattr(nb, 'midi'):
+        if na.midi is not None and nb.midi is not None:
             semitones = abs(int(nb.midi) - int(na.midi))
         else:
-            semitones = int(round(abs(xba) / 1.0))  # approx 1 cm per semitone
-        interval_mult = max(1.0, semitones / 3.0)
+            semitones = int(round(abs(xba) / 1.0))      # hand-built INotes without midi
+        interval_mult = max(1.0, semitones / 2.2)       # was /3.0 on a cm approximation
         time_mult = max(1.0, 0.2 / max(dt_gap, 1e-3))
         return base * interval_mult * time_mult
 
@@ -340,7 +337,7 @@ class Hand:
             if self.LR == 'right' and fa > fb:
                 return HARD
             # F4a: span cost replaces the old axba threshold chain
-            span_cm = abs(xba) * self.hf
+            span_cm = abs(xba)
             return self._span_cost(fa, fb, span_cm)
 
         # Single notes and mixed pairs: crossing rules on x (F5)
@@ -530,7 +527,7 @@ class Hand:
 
 
     #####################################################
-    def _repair_held(self, notes, fingers):
+    def _repair_held_reference(self, notes, fingers):
         """Greedy fix for same-finger overlaps deeper than the Viterbi
         order-2 memory (a note held across 3+ later notes, typical of
         multi-voice beams, B2/F3).
@@ -626,6 +623,114 @@ class Hand:
 
 
     #####################################################
+    def _repair_held(self, notes, fingers):
+        """Linear-time version of _repair_held_reference (F7).
+
+        Same signature and same results. Notes must be sorted by
+        time_real (unsorted input delegates to the reference). Keeps an
+        `active` list of earlier indices whose note may still sound: per
+        note, expired entries (end <= onset + HELD_EPS) can never matter
+        again because onsets never decrease, so `blocked` is computed
+        from `active` only, with the same conditions as the reference.
+        The chord-order check iterates a precomputed chord_members map
+        instead of range(n). Verbose printing and the F7 cost report are
+        unchanged.
+        """
+        n = len(notes)
+        if not all(notes[k].time_real <= notes[k + 1].time_real + 1e-9
+                   for k in range(n - 1)):
+            return self._repair_held_reference(notes, fingers)
+        chord_members = {}
+        for k, nk in enumerate(notes):
+            if nk.isChord:
+                chord_members.setdefault(nk.chordID, []).append(k)
+        f = list(fingers)
+        fixed = 0
+        active = []
+        for i in range(n):
+            bi = notes[i]
+            bi_end = bi.time_real + max(bi.dur_real, 0.0)
+            active = [j for j in active
+                      if notes[j].time_real + max(notes[j].dur_real, 0.0)
+                      > bi.time_real + HELD_EPS]
+            if f[i] not in (1,2,3,4,5):
+                active.append(i)
+                continue
+            blocked = set()
+            for j in active:
+                if f[j] not in (1,2,3,4,5):
+                    continue
+                aj = notes[j]
+                if abs(aj.x - bi.x) < 1e-9:
+                    continue  # same pitch: legal
+                aj_end = aj.time_real + max(aj.dur_real, 0.0)
+                if aj_end > bi.time_real + HELD_EPS \
+                        and bi_end > aj.time_real + HELD_EPS:
+                    blocked.add(f[j])
+            if f[i] not in blocked:
+                active.append(i)
+                continue
+            best, bestc = None, None
+            for cand in (1,2,3,4,5):
+                if cand in blocked:
+                    continue
+                # F4b: repairing a chord member must not break the chord's
+                # pitch order. In (possibly mirrored) x, both hands want
+                # fingers strictly increasing with x (left x is negated in
+                # generate(), so low pitch = large x = large finger).
+                if bi.isChord:
+                    keep = True
+                    for j in chord_members.get(bi.chordID, ()):
+                        if j == i or f[j] not in (1,2,3,4,5):
+                            continue
+                        aj = notes[j]
+                        if abs(aj.x - bi.x) < 1e-9:
+                            if cand != f[j]:
+                                keep = False  # same pitch: same finger
+                                break
+                            continue
+                        if (aj.x < bi.x and not f[j] < cand) or \
+                           (aj.x > bi.x and not cand < f[j]):
+                            keep = False
+                            break
+                    if not keep:
+                        continue
+                c = 0.0
+                if i > 0:
+                    c += self.pair_cost(notes[i-1], f[i-1], bi, cand)
+                if i+1 < n:
+                    c += self.pair_cost(bi, cand, notes[i+1], f[i+1])
+                if best is None or c < bestc:
+                    best, bestc = cand, c
+            if best is not None and best != f[i]:
+                if self.verbose:
+                    print('  held-finger repair: note %d (%s%s) finger %d -> %d'
+                          % (i, bi.name, bi.octave, f[i], best))
+                f[i] = best
+                fixed += 1
+            elif self.verbose:
+                print('  held-finger repair: note %d (%s%s) keeps conflicting'
+                      ' finger %d (no free finger)' % (i, bi.name, bi.octave, f[i]))
+            active.append(i)
+
+        # F7: Recompute total cost after repair
+        if fixed:
+            cost_before = self.total_cost(notes, fingers)
+            cost_after = self.total_cost(notes, f)
+            if cost_after > cost_before:
+                if self.verbose:
+                    print('  WARNING: held-finger repair increased total cost: %.2f -> %.2f'
+                          % (cost_before, cost_after))
+            if fixed > 0.01 * n:
+                if self.verbose:
+                    print('  held-finger repair: fixed %d / %d notes (%.1f%%)'
+                          % (fixed, n, 100.0 * fixed / n))
+            elif self.verbose:
+                print('  held-finger repair: fixed %d note(s)' % fixed)
+        return f
+
+
+    #####################################################
     def optimize_seq(self, nseq, istart):
         '''Generate meaningful fingering for a note sequence of size depth'''
 
@@ -651,6 +756,8 @@ class Hand:
                 if fa==fb: return True   # play different chord notes w/ same finger, skip
                 if fa<fb and self.LR=='left' : return True
                 if fa>fb and self.LR=='right': return True
+                # NOTE: legacy axba scaling (raw cm * hf / 0.8) is inverted
+                # vs _span_cost (raw cm vs limit * hf); left as-is, legacy only.
                 axba = abs(xba)*self.hf /0.8
                 # max normalized distance in cm btw 2 consecutive fingers
                 if axba> 5 and (fa==3 and fb==4 or fa==4 and fb==3): return True
@@ -740,6 +847,11 @@ class Hand:
 
         if start_measure == 1:
             start_measure=0 # avoid confusion with python numbering
+
+        if self.verbose:
+            print('Your hand span set to size-'+self.size,
+                  'which is', 21*self.hf, 'cm')
+            print('(max relaxed distance between thumb and pinkie)')
 
         if self.LR == "left":
             for anote in self.noteseq:

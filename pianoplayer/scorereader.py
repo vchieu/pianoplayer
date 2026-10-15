@@ -35,6 +35,8 @@ class INote:
         self.NinChord = 0
         self.chordID  = 0
         self.noteID   = 0
+        self.midi     = None   # MIDI pitch number (int); None = hand-built
+                               # INote without one (_crossing_cost falls back)
 
 
 #####################################################
@@ -115,6 +117,7 @@ def reader(sf, beam=0, tempo_map=None):
             an.name     = n.name
             an.octave   = n.octave
             an.measure  = n.measureNumber
+            an.midi     = int(p.midi)
             an.x        = keypos(n)
             an.time     = off + shift
             an.duration = ql
@@ -163,6 +166,7 @@ def reader(sf, beam=0, tempo_map=None):
                 an.NinChord = len(kept)
                 an.octave   = cn.octave
                 an.measure  = n.measureNumber
+                an.midi     = int(cn.midi)
                 an.x        = keypos(cn)
                 an.time     = off + shift - sfasam*j
                 an.duration = ql + sfasam*(len(kept)-1)

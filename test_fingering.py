@@ -17,6 +17,7 @@ solved for both right and left hands, checks:
     python test_fingering.py
 """
 import os
+import random
 import sys
 import time
 import traceback
@@ -258,6 +259,29 @@ def test_solve_500_notes_fast():
     print("   A1.5 solved 500 notes in %.3f s" % dt)
     check(len(h.noteseq) == 500, "expected 500 notes, got %d" % len(h.noteseq))
     check(dt < 2.0, "500-note solve took %.3f s (>= 2 s)" % dt)
+
+
+def test_solve_long_score_time():
+    """Phase 0 step 0.3: synth:long (3000 notes) solves in < 8 s.
+
+    Baseline on unmodified code: ~4.3 s for generate() alone (M, right).
+    Phase 1 step 1.5 must make it faster (linear _repair_held)."""
+    rng = random.Random(7)
+    p = stream.Part()
+    p.insert(0, tempo.MetronomeMark(number=120))
+    midi = 60
+    for i in range(3000):
+        p.insert(i * 0.5, note.Note(midi, quarterLength=0.5))
+        midi = min(84, max(48, midi + rng.randint(-4, 4)))
+    s = stream.Score()
+    s.insert(0, p)
+    t0 = time.perf_counter()
+    h = make_hand(s)
+    dt = time.perf_counter() - t0
+    print("   long solved 3000 notes in %.3f s" % dt)
+    check(len(h.noteseq) == 3000,
+          "expected 3000 notes, got %d" % len(h.noteseq))
+    check(dt < 8.0, "3000-note solve took %.3f s (>= 8 s)" % dt)
 
 
 # --------------------------------------------------------------------------- #

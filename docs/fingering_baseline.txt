@@ -1,0 +1,149 @@
+# fingering audit (Phase 0 step 0.1; diagnostic, never asserts)
+# columns: source | side | size | notes | solve_s | violations | overlaps | chords | postpass_changed | total_cost | hist(1..5)
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 259 objects in stream.
+scanned 100 / 243 notes, measure 25  for the right hand...
+scanned 200 / 243 notes, measure 44  for the right hand...
+file:bach_invention4.xml | right | M | 243 | 0.083 | 0 | 0 | 0 | 0 | 992.84 | 1:51,2:45,3:64,4:41,5:42
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 259 objects in stream.
+scanned 100 / 243 notes, measure 25  for the left hand...
+scanned 200 / 243 notes, measure 44  for the left hand...
+file:bach_invention4.xml | left | M | 243 | 0.086 | 0 | 0 | 0 | 0 | 1786.07 | 1:50,2:47,3:77,4:37,5:32
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 70 objects in stream.
+scanned 100 / 109 notes, measure 9  for the right hand...
+file:test_chords.xml | right | M | 109 | 0.039 | 0 | 0 | 30 | 32 | 653.64 | 1:29,2:21,3:20,4:18,5:21
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 70 objects in stream.
+scanned 100 / 109 notes, measure 9  for the left hand...
+file:test_chords.xml | left | M | 109 | 0.040 | 0 | 0 | 30 | 4 | 946.99 | 1:27,2:17,3:25,4:16,5:24
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 159 objects in stream.
+scanned 100 / 138 notes, measure 17  for the right hand...
+file:test_scales.xml | right | M | 138 | 0.047 | 0 | 0 | 0 | 0 | 303.36 | 1:30,2:38,3:42,4:15,5:13
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 159 objects in stream.
+scanned 100 / 138 notes, measure 17  for the left hand...
+file:test_scales.xml | left | M | 138 | 0.043 | 0 | 0 | 0 | 0 | 578.35 | 1:27,2:38,3:48,4:15,5:10
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 10 objects in stream.
+synth:multivoice | right | M | 9 | 0.002 | 0 | 0 | 0 | 0 | 41.04 | 1:1,2:2,3:2,4:3,5:1
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 10 objects in stream.
+synth:multivoice | left | M | 9 | 0.002 | 0 | 0 | 0 | 0 | 103.94 | 1:2,2:1,3:4,4:1,5:1
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:chords | right | M | 24 | 0.015 | 0 | 0 | 8 | 9 | 123.36 | 1:8,2:0,3:8,4:0,5:8
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:chords | left | M | 24 | 0.008 | 0 | 0 | 8 | 9 | 209.07 | 1:8,2:3,3:5,4:0,5:8
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 17 objects in stream.
+synth:repeated | right | M | 16 | 0.007 | 0 | 0 | 0 | 0 | 21.08 | 1:3,2:4,3:4,4:3,5:2
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 17 objects in stream.
+synth:repeated | left | M | 16 | 0.003 | 0 | 0 | 0 | 0 | 38.52 | 1:2,2:3,3:5,4:3,5:3
+Your hand span set to size-XXS which is 6.930000000000001 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | right | XXS | 16 | 0.006 | 8 | 0 | 8 | 0 | 2746.39 | 1:5,2:3,3:8,4:0,5:0
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | right | M | 16 | 0.005 | 8 | 0 | 8 | 3 | 2419.72 | 1:5,2:3,3:3,4:0,5:5
+Your hand span set to size-XXL which is 25.2 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | right | XXL | 16 | 0.006 | 8 | 0 | 8 | 4 | 2056.49 | 1:5,2:3,3:1,4:0,5:7
+Your hand span set to size-XXS which is 6.930000000000001 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | left | XXS | 16 | 0.006 | 8 | 0 | 8 | 0 | 2740.31 | 1:5,2:0,3:3,4:2,5:6
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | left | M | 16 | 0.006 | 8 | 0 | 8 | 0 | 2312.09 | 1:5,2:3,3:0,4:0,5:8
+Your hand span set to size-XXL which is 25.2 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:octaves | left | XXL | 16 | 0.006 | 8 | 0 | 8 | 0 | 1960.31 | 1:5,2:3,3:0,4:0,5:8
+Your hand span set to size-XXS which is 6.930000000000001 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | right | XXS | 24 | 0.008 | 0 | 0 | 8 | 0 | 516.39 | 1:8,2:3,3:5,4:0,5:8
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | right | M | 24 | 0.009 | 0 | 0 | 8 | 5 | 165.42 | 1:8,2:0,3:8,4:0,5:8
+Your hand span set to size-XXL which is 25.2 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | right | XXL | 24 | 0.009 | 0 | 0 | 8 | 5 | 276.39 | 1:4,2:7,3:1,4:7,5:5
+Your hand span set to size-XXS which is 6.930000000000001 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | left | XXS | 24 | 0.009 | 0 | 0 | 8 | 1 | 500.73 | 1:7,2:4,3:5,4:0,5:8
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | left | M | 24 | 0.007 | 0 | 0 | 8 | 8 | 233.10 | 1:8,2:4,3:4,4:0,5:8
+Your hand span set to size-XXL which is 25.2 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 9 objects in stream.
+synth:triads | left | XXL | 24 | 0.007 | 0 | 0 | 8 | 8 | 273.65 | 1:4,2:7,3:5,4:3,5:5
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 65 objects in stream.
+synth:alberti | right | M | 64 | 0.016 | 0 | 0 | 0 | 0 | 98.89 | 1:16,2:0,3:16,4:0,5:32
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 65 objects in stream.
+synth:alberti | left | M | 64 | 0.016 | 0 | 0 | 0 | 0 | 471.26 | 1:32,2:0,3:32,4:0,5:0
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 14 objects in stream.
+synth:arpeggio | right | M | 13 | 0.003 | 0 | 0 | 0 | 0 | 153.96 | 1:4,2:4,3:3,4:1,5:1
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 14 objects in stream.
+synth:arpeggio | left | M | 13 | 0.003 | 0 | 0 | 0 | 0 | 164.77 | 1:2,2:4,3:6,4:0,5:1
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 3001 objects in stream.
+synth:long | right | M | 3000 | 3.817 | 0 | 0 | 0 | 0 | 6931.21 | 1:550,2:738,3:915,4:464,5:333
+Your hand span set to size-M which is 17.22 cm
+(max relaxed distance between thumb and pinkie)
+Reading beam 0 with 3001 objects in stream.
+synth:long | left | M | 3000 | 3.889 | 0 | 0 | 0 | 0 | 11217.86 | 1:658,2:617,3:951,4:487,5:287
+
+# ---- after Phase 1 (F1 span fix + thumb rows + midi semitones + linear repair) ----
+# gold: 5/6 exact + 1 XFAIL (C arpeggio R, unchanged pre/post); gold-extra: 2/9 exact (22.2%, informational)
+# 3000-note long: generate ~0.85 s (was ~4.3 s); repair 4.23 s -> 0.011 s (equal output)
+# octave/triad rows (left-M octave remainder (3) is thumb-on-black velocity, F6 territory, out of scope):
+# synth:octaves | right | XXS | 16 | 0.005 | 8 | 0 | 8 | 0 | 2746.39 | 1:5,2:3,3:8,4:0,5:0
+# synth:octaves | right | M | 16 | 0.004 | 0 | 0 | 8 | 0 | 1369.94 | 1:8,2:0,3:0,4:0,5:8
+# synth:octaves | right | XXL | 16 | 0.008 | 0 | 0 | 8 | 0 | 186.98 | 1:8,2:0,3:0,4:0,5:8
+# synth:octaves | left | XXS | 16 | 0.007 | 8 | 0 | 8 | 0 | 2740.13 | 1:5,2:0,3:3,4:2,5:6
+# synth:octaves | left | M | 16 | 0.005 | 3 | 0 | 8 | 0 | 1615.18 | 1:8,2:0,3:0,4:0,5:8
+# synth:octaves | left | XXL | 16 | 0.004 | 0 | 0 | 8 | 0 | 365.61 | 1:8,2:0,3:0,4:0,5:8
+# synth:triads | right | XXS | 24 | 0.008 | 9 | 0 | 8 | 16 | 2716.74 | 1:7,2:5,3:1,4:3,5:8
+# synth:triads | right | M | 24 | 0.008 | 0 | 0 | 8 | 0 | 146.62 | 1:8,2:1,3:7,4:3,5:5
+# synth:triads | right | XXL | 24 | 0.007 | 0 | 0 | 8 | 0 | 137.94 | 1:8,2:8,3:8,4:0,5:0
+# synth:triads | left | XXS | 24 | 0.009 | 8 | 0 | 8 | 2 | 2244.73 | 1:8,2:0,3:3,4:5,5:8
+# synth:triads | left | M | 24 | 0.008 | 0 | 0 | 8 | 0 | 229.99 | 1:8,2:7,3:1,4:2,5:6
+# synth:triads | left | XXL | 24 | 0.010 | 0 | 0 | 8 | 4 | 188.01 | 1:4,2:8,3:6,4:2,5:4
+# XXS output differs from XXL on both chord sources (hand size matters).
+# PIG: no dataset available on this machine (baseline not measurable); loader verified on synthetic file.
