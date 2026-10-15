@@ -32,6 +32,21 @@ FALLBACK_BPM = 120.0        # F1: quarters -> seconds when t_sec is missing
                             # (hand-built INotes that never went through
                             # reader()).
 
+# Phase 2 experiments (each OFF until validated per PIANOPLAYER_FINGERING_PLAN
+# §4.0; defaults reproduce current behaviour exactly).
+START_PREF_RIGHT = {1: -10.0, 5: -1.0}   # E1: first-note prior, right hand
+START_PREF_LEFT = {5: -5.0, 1: -1.0}     # E1: first-note prior, left hand
+V_CAP = float("inf")        # E2: cap on the velocity term reach_err/dt
+                            # (cm/s) before the weight division; inf = off.
+UNDER_REACH_CM = 1e9        # E3: hf=1 distance a thumb can tuck under
+                            # without extra effort (1e9 = off).
+UNDER_DIST_K = 0.0          # E3: extra cost factor beyond that distance
+                            # (0.0 = off).
+UNDER_LEAP_FROM5 = 1.0      # E3: multiplier of UNDER[5] when the thumb
+                            # lands >= 4 cm away (1.0 = off).
+PATTERN_343_PENALTY = 0.0   # E4: extra cost for 3-4-3 / 4-3-4 triples in
+                            # solve_viterbi (0.0 = off).
+
 
 def _dt_sec(na, nb):
     """Inter-onset gap in seconds (F1), without the smoothing term."""
@@ -277,6 +292,13 @@ class Hand:
         # Thumb-under: fb == 1 (thumb passes under fa)
         if fb == 1 and fa > 1:
             base = _HS.UNDER.get(fa, 1.0)
+            # E3 (OFF defaults): distance-aware thumb-under. Longer tucks
+            # cost extra beyond UNDER_REACH_CM, and a 5 -> 1 leap over a
+            # third or more is the standard arpeggio hand rotation.
+            base *= 1.0 + UNDER_DIST_K * max(
+                0.0, abs(xba) / (UNDER_REACH_CM * self.hf) - 1.0)
+            if fa == 5 and abs(xba) >= 4.0:
+                base *= UNDER_LEAP_FROM5
             # Departing from a black key onto white (the classic Bb->C tuck):
             # the hand is already raised, so the tuck rides the hand position
             # (halved). White->white tucks pay full UNDER so the after-3 vs
@@ -406,7 +428,8 @@ class Hand:
             
         dt_gap = _dt_sec(na, nb)
         dt = dt_gap + SEC_SMOOTH  # available time (s) + smoothing term
-        v  = reach_err/dt                # velocity
+        v  = min(reach_err/dt, V_CAP)  # E2: V_CAP bounds the velocity term
+                                       # (inf = unbounded, as before)
         if nb.isBlack:                   # penalty (by increasing speed)
             v /= self.weights[fb] * self.bfactor[fb]
         else:
@@ -493,7 +516,7 @@ class Hand:
         # F0/F6: Start preference - right hand prefers thumb (1), left prefers pinky (5)
         # Stronger preference to overcome the pairwise cost advantage of starting on 2/3
         # Left hand needs even stronger preference for pinky to avoid thumb-start traps
-        start_pref = {1: -10.0, 5: -1.0} if self.LR == "right" else {5: -5.0, 1: -1.0}
+        start_pref = START_PREF_RIGHT if self.LR == "right" else START_PREF_LEFT
         for fa in fingers:
             for fb in fingers:
                 dp[(fa, fb)] = cost_tables[0][fa, fb] + start_pref.get(fa, 0.0)
@@ -510,6 +533,12 @@ class Hand:
                     best, bestfp = None, None
                     for fp in fingers:
                         c = dp[(fp, fa)] + pc
+                        # E4 (OFF default): penalise the awkward 3-4-3 /
+                        # 4-3-4 weak-pair alternation (order-2 state).
+                        if PATTERN_343_PENALTY and (
+                                (fp, fa, fb) == (3, 4, 3)
+                                or (fp, fa, fb) == (4, 3, 4)):
+                            c += PATTERN_343_PENALTY
                         if nc_held and fp == fb and abs(nb.x - nc.x) > 1e-9:
                             c += HARD
                         if best is None or c < best:

@@ -147,3 +147,27 @@ synth:long | left | M | 3000 | 3.889 | 0 | 0 | 0 | 0 | 11217.86 | 1:658,2:617,3:
 # synth:triads | left | XXL | 24 | 0.010 | 0 | 0 | 8 | 4 | 188.01 | 1:4,2:8,3:6,4:2,5:4
 # XXS output differs from XXL on both chord sources (hand size matters).
 # PIG: no dataset available on this machine (baseline not measurable); loader verified on synthetic file.
+
+# ---- after Phase 2 (E1-E4 evidence; NO PIG dataset -> all defaults stay OFF, "unvalidated") ----
+# gold: 5/6 exact + 1 XFAIL (C arpeggio R) at 60/120/200bpm checks; gold-extra: 2/9 exact (22.2%, informational)
+# tune_fingering.py: baseline GOLD_EXTRA 22.2% == eval_fingering.py's; prints "no PIG: result is only a hint".
+#   Coordinate descent (<=2 sweeps) suggests hand.SEC_SMOOTH 0.1 -> 0.2 (+11.11pp: "A scale R" flips to OK,
+#   synth:octaves left M violations 3 -> 0, overlaps +0). NOT applied: hint only without PIG (criterion 3 N/A).
+# E1 start prior (START_PREF_RIGHT/LEFT constants, defaults = current): prior VALIDATED by data, keep current.
+#   {} (no prior): breaks gold (gold_ok=False), GOLD_EXTRA 22.2% -> 11.1%, GOLD first-note accuracy 6/6 -> 2/6.
+#   halved: breaks gold, GOLD_EXTRA -> 11.1%, first-note 6/6 -> 3/6. Rejected by criterion 1 (STOP, left OFF).
+# E2 velocity cap (V_CAP, default inf): V_CAP=40 fixes the Phase-1 F6 remainder with minimal churn.
+#   [20: gold OK, extra 22.2%, dviol -3, doverlap +0] [40: same, least churn] [80: no change] [inf: baseline].
+#   The -3 is exactly synth:octaves left M 3 -> 0 (thumb-on-black velocity), fingering stays {1,5} octaves;
+#   alberti/long rows byte-identical (fingerings + costs); no row worse on violations/overlaps.
+#   Passes criteria 1, 2, 4; PIG unvalidated -> default stays inf; recommend V_CAP=40 once PIG confirms.
+# E3 distance-aware thumb-under (OFF defaults 1e9/0.0/1.0; tried options (a)+(b) = 27 combos, then STOP):
+#   no combo passes C arpeggio R (stays in KNOWN_FAIL; got stays [1,2,4,3,1,2,3,5] except reach=3/k=4
+#   which moves it to [1,2,3,4,3,2,3,5] but BREAKS F scale R gold -> [3,1,2,3,1,2,3,4], rejected by criterion 1).
+#   Other 24 combos: gold OK, extra 22.2%, audit dviol=0 doverlap=0 (no effect). E3 stays OFF.
+# E4 3-4-3/4-3-4 penalty (default 0.0): [0.5, 1.0, 2.0] all give gold OK, extra 22.2%, dviol=0 doverlap=0.
+#   No evidence for any nonzero value. E4 stays OFF.
+# Final state: zero behaviour change vs Phase 1 (all experiment defaults = old behaviour); audit table
+# below re-measured after Phase 2 is identical to the Phase-1 state (modulo solve_s timings).
+# VERIFIED 2026-10-15: post-Phase-2 `python fingering_audit.py` reproduces the Phase-1 table on all
+# 30 rows (violations, overlaps, total_cost, histograms identical; only solve_s differs).
