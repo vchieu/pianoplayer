@@ -91,6 +91,10 @@ class Hand:
         # True = legacy 9-note sliding-window search (optimize_seq).
         # The -d/--depth flag only has an effect in legacy mode.
         self.legacy_window = False
+        # Phase 3 (§5): False = layered chord-as-note DP (default);
+        # True = legacy note-by-note Viterbi + _apply_chord_candidates
+        # post-pass (kept for one release for comparison).
+        self.legacy_chord_postpass = False
 
         self.hf = utils.handSizeFactor(size)
         for i in (1,2,3,4,5):
@@ -169,12 +173,14 @@ class Hand:
                 cost += _HS.WHITE_COST.get(fa, 0.0)
         return cost
 
-    def _chord_finger_candidates(self, chord_notes):
+    def _chord_finger_candidates(self, chord_notes, limit=6):
         """F4b: Generate monotonic finger sets for a chord (≤5 notes).
 
-        Returns top-K=6 candidates by static cost. Never returns empty:
-        if the span filter rejects every monotonic combo, retry unfiltered
-        (monotonicity is guaranteed by construction either way).
+        Returns top-`limit` candidates by static cost (`limit=None`
+        returns all, used by the Phase 3 layered DP). Never returns
+        empty: if the span filter rejects every monotonic combo, retry
+        unfiltered (monotonicity is guaranteed by construction either
+        way).
         """
         k = len(chord_notes)
         if k > 5:
@@ -196,7 +202,10 @@ class Hand:
             cands = list(combos)  # pass 2: span-relaxed, still monotonic
         scored = [(self._static_chord_cost(c, chord_notes), c) for c in cands]
         scored.sort(key=lambda x: x[0])
-        return [f for _, f in scored[:6]]
+        ranked = [f for _, f in scored]
+        if limit is None:
+            return ranked
+        return ranked[:limit]
 
     def _chord_span_ok(self, fings, chord_notes):
         """True when every adjacent pair of the chord fits MAX_SPAN."""
@@ -209,16 +218,26 @@ class Hand:
     def _apply_chord_candidates(self, notes, fingers):
         """F4b post-pass: pin every chord group to one whole candidate.
 
+        Phase 3 (§5): retired in the default layered-DP path -- the DP
+        already assigns every chord layer one whole monotonic candidate,
+        so there is nothing left to pin and this returns the input
+        unchanged (hence the audit `postpass_changed` is 0 there).
+        With `legacy_chord_postpass = True` the old behaviour below is
+        kept verbatim for one release:
+
         The order-2 Viterbi state cannot enforce whole-chord consistency
         (HARD is a soft cost, so paths can switch candidates mid-chord);
         this pass picks, per group, the candidate minimizing static cost
         plus transition costs to the fixed neighbours. Monotonicity and
         distinct fingers hold by construction.
         """
+        if not self.legacy_chord_postpass:
+            return list(fingers)
         f = list(fingers)
         n = len(notes)
+        chord_cands = getattr(self, "_chord_candidates", {})
         for start, end, chord_notes in self._group_chords(notes):
-            cands = self._chord_candidates.get(start)
+            cands = chord_cands.get(start)
             if not cands:
                 continue
             k = end - start
@@ -476,14 +495,220 @@ class Hand:
 
     #####################################################
     def solve_viterbi(self, notes):
-        """Viterbi-optimal finger sequence (1..5) for the whole note list.
+        """Optimal finger sequence (1..5) for the whole note list.
 
+        Default (Phase 3, §5) is the layered chord-as-note DP
+        (`solve_layered`); with `legacy_chord_postpass = True` the old
+        note-by-note Viterbi below runs instead (caller must still apply
+        `_apply_chord_candidates`, as `generate()` does).
+        """
+        if self.legacy_chord_postpass:
+            return self._solve_viterbi_legacy(notes)
+        return self.solve_layered(notes)
+
+    def _build_layers(self, notes):
+        """Split notes into layers (§5): one single note, or one whole
+        chord group (consecutive notes sharing a chordID). Returns a
+        list of (start, end) index ranges."""
+        layers = []
+        i, n = 0, len(notes)
+        while i < n:
+            if notes[i].isChord:
+                cid = notes[i].chordID
+                j = i
+                while j < n and notes[j].isChord and notes[j].chordID == cid:
+                    j += 1
+                layers.append((i, j))
+                i = j
+            else:
+                layers.append((i, i + 1))
+                i += 1
+        return layers
+
+    def _layer_candidates(self, layer_notes):
+        """Candidate finger tuples for one layer (§5).
+
+        Single note -> (1,)..(5,). Chord (<=5) -> ALL monotonic sets
+        from `_chord_finger_candidates` WITHOUT the top-6 pruning (at
+        most C(5,k) <= 10 per layer), span-filtered with unfiltered
+        fallback, sorted by static cost. Chords with >5 notes assign
+        the lowest 5 here; each extra note takes the finger of the
+        nearest assigned pitch at decode (documented compromise).
+        """
+        if len(layer_notes) == 1 and not layer_notes[0].isChord:
+            return [[f] for f in (1, 2, 3, 4, 5)]
+        members = layer_notes
+        if len(members) > 5:
+            warnings.warn(
+                f"Chord with {len(members)} notes > 5: lowest 5 assigned,"
+                " extras take the nearest assigned finger", stacklevel=2)
+            members = members[:5]
+        return self._chord_finger_candidates(members, limit=None)
+
+    def _layer_held_extra(self, Anotes, candA, Bnotes, candB):
+        """HARD per held-finger violation over ALL note pairs across two
+        adjacent layers, EXCEPT (last of A, first of B), which
+        `pair_cost` already covers. Same condition as the B2 rule in
+        `pair_cost` (same finger, different key, A-note still sounding
+        at B-note onset)."""
+        extra = 0.0
+        la = len(Anotes) - 1
+        for p, (na, fa) in enumerate(zip(Anotes, candA)):
+            if fa not in (1, 2, 3, 4, 5):
+                continue
+            for q, (nb, fb) in enumerate(zip(Bnotes, candB)):
+                if p == la and q == 0:
+                    continue  # inside pair_cost already
+                if fb not in (1, 2, 3, 4, 5):
+                    continue
+                if fa == fb and abs(nb.x - na.x) > 1e-9 \
+                        and na.time_real + na.dur_real > nb.time_real + HELD_EPS:
+                    extra += HARD
+        return extra
+
+    def _expand_layer_fingers(self, layer_notes, cand):
+        """Per-note fingers for one solved layer, expanding >5-note
+        chords (lowest 5 assigned; each extra note takes the finger of
+        the nearest assigned pitch by keyboard distance, lowest index
+        on ties)."""
+        if len(layer_notes) > 5:
+            fit = layer_notes[:5]
+            out = list(cand)
+            for m in layer_notes[5:]:
+                bi = min(range(5),
+                         key=lambda i: (abs(m.x - fit[i].x), i))
+                out.append(cand[bi])
+            return out
+        return list(cand)
+
+    def solve_layered(self, notes):
+        """Layered chord-as-note DP (§5, Phase 3).
+
+        Each layer is one note or one whole chord. Layer-to-layer cost
+        is `pair_cost()` between the LAST note of layer i and the FIRST
+        note of layer i+1 (position/velocity/crossing, incl. all Phase 2
+        OFF-default constants via the shared code path) plus the
+        held-finger rule over ALL other note pairs across the two
+        layers, plus the chord-layer interior objective inside each
+        chord layer (Amendment A: `_static_chord_cost` plus internal
+        consecutive `pair_cost`, the validated post-pass interior).
+        The order-2 state mirrors `solve_viterbi` (so
+        `PATTERN_343_PENALTY` applies to three consecutive single-note
+        layers exactly as there); a held note spanning two layers stays
+        in the `_repair_held` post-pass, not in the DP state.
+        Deterministic: ties keep the first minimum.
+        """
+        n = len(notes)
+        if n == 0:
+            return []
+        if n == 1:
+            return [3]
+        layers = self._build_layers(notes)
+        L = len(layers)
+        layer_notes = [notes[s:e] for s, e in layers]
+        cands = [self._layer_candidates(ln) for ln in layer_notes]
+        is_single = [len(ln) == 1 and not ln[0].isChord
+                     for ln in layer_notes]
+        # Node costs: chord-layer interior objective (Amendment A) =
+        # _static_chord_cost + internal consecutive pair_cost between
+        # adjacent chord members -- exactly the validated
+        # _apply_chord_candidates interior (static + internal pair
+        # costs). Neighbour transitions stay inter-layer pair_cost
+        # (last -> first), so nothing is double-counted.
+        node = []
+        for ln, cc, single in zip(layer_notes, cands, is_single):
+            if single:
+                node.append([0.0] * len(cc))
+            else:
+                fit = ln[:5] if len(ln) > 5 else ln
+                costs = []
+                for c in cc:
+                    tot = self._static_chord_cost(c, fit)
+                    for j in range(len(fit) - 1):
+                        tot += self.pair_cost(fit[j], c[j],
+                                              fit[j + 1], c[j + 1])
+                    costs.append(tot)
+                node.append(costs)
+        if L == 1:
+            # A single chord layer: cheapest interior objective (+ start prior).
+            start_pref = (START_PREF_RIGHT if self.LR == "right"
+                          else START_PREF_LEFT)
+            best = None
+            for c, cc in enumerate(cands[0]):
+                tot = node[0][c] + start_pref.get(cc[0], 0.0)
+                if best is None or tot < best[1]:
+                    best = (c, tot)
+            return self._expand_layer_fingers(layer_notes[0],
+                                              cands[0][best[0]])
+        # Boundary pair_cost tables (float32, exactly like solve_viterbi).
+        bounds = []
+        for j in range(L - 1):
+            na, nb = layer_notes[j][-1], layer_notes[j + 1][0]
+            table = np.zeros((6, 6), dtype=np.float32)
+            for fa in range(1, 6):
+                for fb in range(1, 6):
+                    table[fa, fb] = self.pair_cost(na, fa, nb, fb)
+            bounds.append(table)
+        start_pref = (START_PREF_RIGHT if self.LR == "right"
+                      else START_PREF_LEFT)
+        # dp[(a, b)]: cheapest cost ending with cands[j-1][a] on layer
+        # j-1 and cands[j][b] on layer j.
+        dp = {}
+        for a, ca in enumerate(cands[0]):
+            for b, cb in enumerate(cands[1]):
+                dp[(a, b)] = (start_pref.get(ca[0], 0.0) + node[0][a]
+                               + float(bounds[0][ca[-1], cb[0]])
+                               + self._layer_held_extra(layer_notes[0], ca,
+                                                        layer_notes[1], cb)
+                               + node[1][b])
+        back = {1: {(a, b): a for (a, b) in dp}}
+        for j in range(2, L):
+            ndp, nback = {}, {}
+            for b, cb in enumerate(cands[j - 1]):
+                for c, cc in enumerate(cands[j]):
+                    pc = (float(bounds[j - 1][cb[-1], cc[0]])
+                          + self._layer_held_extra(layer_notes[j - 1], cb,
+                                                   layer_notes[j], cc)
+                          + node[j][c])
+                    best, best_a = None, None
+                    for a, ca in enumerate(cands[j - 2]):
+                        tot = dp[(a, b)] + pc
+                        # E4 (OFF default): same 3-4-3 / 4-3-4 rule as
+                        # solve_viterbi, for three single-note layers.
+                        if PATTERN_343_PENALTY and is_single[j - 2] \
+                                and is_single[j - 1] and is_single[j]:
+                            triple = (ca[0], cb[0], cc[0])
+                            if triple == (3, 4, 3) \
+                                    or triple == (4, 3, 4):
+                                tot += PATTERN_343_PENALTY
+                        if best is None or tot < best:
+                            best, best_a = tot, a
+                    ndp[(b, c)] = best
+                    nback[(b, c)] = best_a
+            dp, back[j] = ndp, nback
+
+        bb, bc = min(dp, key=lambda k: dp[k])
+        pick = [0] * L
+        pick[L - 1], pick[L - 2] = bc, bb
+        for j in range(L - 1, 1, -1):
+            pick[j - 2] = back[j][(pick[j - 1], pick[j])]
+        out = []
+        for ln, cc in zip(layer_notes,
+                           [cands[j][pick[j]] for j in range(L)]):
+            out.extend(self._expand_layer_fingers(ln, cc))
+        return out
+
+    def _solve_viterbi_legacy(self, notes):
+        """Note-by-note Viterbi (pre-Phase-3 path).
+
+        Kept verbatim behind `legacy_chord_postpass = True`; the caller
+        must still apply `_apply_chord_candidates` afterwards.
         State is the finger pair (f_{i-1}, f_i) -- 25 states, 125
         transitions per step -- so that, besides the consecutive-pair
         cost, a finger held by note i-2 can also be honoured when note i
         starts (B2). Back-pointers recover the cheapest path; ties keep
         the first minimum, so repeated runs agree exactly.
-        
+
         F4b: chord groups are pinned to whole candidates by
         `_apply_chord_candidates` after the solve (not here: an order-2
         state cannot enforce whole-chord consistency).
@@ -870,6 +1095,10 @@ class Hand:
         Unless self.legacy_window is True, the whole in-range slice is
         solved at once with solve_viterbi() (B1): no dummy-note padding
         is needed for short scores, and a single note gets finger 3.
+        solve_viterbi() runs the Phase 3 layered chord-as-note DP by
+        default (whole-chord candidates, no post-pass); with
+        self.legacy_chord_postpass = True it runs the legacy
+        note-by-note Viterbi plus the chord post-pass instead.
         The legacy 9-note sliding-window search lives in
         _generate_legacy(), where -d/--depth still applies.
         """
