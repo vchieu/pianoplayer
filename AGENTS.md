@@ -22,10 +22,16 @@ python test_shadow.py         # vtkShadowMapPass pipeline sanity
 python test_sound.py          # legacy simpleaudio chord playback
 python test_regression.py     # finger/key/audio/fingering consistency, offscreen, no audio device
 python test_fingering.py      # fingering validity (fingers 1..5, held-finger, chord order) + 500-note solve time
+python test_fingering_spans.py # hand span limits vs limit * hf (size matters)
+python test_fingering_props.py # fingering property checks
+python test_pig_loader.py     # PIG loading via load_pig (chords included)
+python test_fingering_hints.py # INote.hint / PIN_COST hint handling
+python fingering_audit.py     # audit tool for fingering output
+python tune_fingering.py      # tuning tool for fingering weights
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
 python test_hand_anatomy.py   # anatomical proportions on the mesh (6 checks)
 python test_review_fixes.py   # review-fix acceptance: cache persistence, t_sec, texture fallback, thumb lock
-python eval_fingering.py      # fingering quality gates (gold + PIG + F1-F3 + aim; C arpeggio R is XFAIL)
+python eval_fingering.py      # fingering quality gates (gold + PIG via load_pig, chords included, note-weighted avg + F1-F3 + aim; C arpeggio R is XFAIL)
 python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend, offscreen
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
 python test_falling.py        # falling-note geometry (numpy only, no window)
@@ -40,7 +46,8 @@ build manifest.
 | File | Role |
 |------|------|
 | `bin/pianoplayer` | CLI + Tkinter GUI entry point (installed as the `pianoplayer` script) |
-| `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` |
+| `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` (duplicate-chord behaviour unchanged; CLI/GUI import path only) |
+| `pianoplayer/pigloader.py` | PIG dataset loading via `load_pig()` (chords included, note-weighted-average evaluation) |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
 | `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`) |
 | `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`); `hand3d` and `handmesh` both import from here |
@@ -79,7 +86,8 @@ the score tempo map -- see F1) pay `WEAK_FINGER_PENALTY = +3`. Lower total is be
 violation, applied to **every** consecutive pair including chord<->note):
 same finger on two different notes/pitches, finger crossings, thumb-to-black
 crossings, and (inside chords) finger-order violations plus smooth span
-costs (`MAX_SPAN`/`COMFORT_SPAN` tables in `handspec.py`, quadratic ramp to
+costs (`MAX_SPAN`/`COMFORT_SPAN` tables in `handspec.py`, incl. new thumb rows,
+compared as raw cm vs `limit * hf` so hand size matters, quadratic ramp to
 `HARD` beyond max, F4a). Same finger on different keys is HARD only while the first note is
 still held or the gap is at most 0.25 s; slower reuse pays a soft
 `SAME_FINGER_BASE + 0.15 * |dx|` (F3). Non-thumb crossings pay a soft
@@ -94,8 +102,16 @@ finger 0 or an impossible spot never kills a whole solution.
 chord group (≤5 notes) is pinned to one whole monotonic candidate
 (pre-generated `C(5,k)`, top-6 by static cost, never empty) minimizing static
 + neighbour transition costs -- the order-2 Viterbi state cannot enforce
-whole-chord consistency. `_repair_held` keeps chord pitch order when
-re-fingering members, then reports cost delta (F7).
+whole-chord consistency. Layered chord DP (Amendment A node cost) covers the
+same whole-chord consistency; `legacy_chord_postpass` flag selects the legacy
+pass. `_repair_held` keeps chord pitch order when
+re-fingering members, then reports cost delta (F7). It runs in linear time.
+
+**Hints**: `INote.midi` carries the MIDI pitch and `INote.hint` an optional
+pinned finger; pinned notes pay `PIN_COST` unless the solver uses the hint.
+
+**Phase-2 verdicts**: E1 prior validated/OFF, E2 (`V_CAP = 40` +
+`SEC_SMOOTH = 0.2` candidates) unvalidated without PIG, E3/E4 OFF.
 
 **Held-finger constraint** (`pair_cost` + `_repair_held`): when note `a` still
 sounds while `b` starts (`a.time_real + a.dur_real > b.time_real + HELD_EPS`),
@@ -333,8 +349,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.8.0'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.8.0"`).
+  `setup.py` (`version='2.9.0'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.9.0"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

@@ -177,7 +177,20 @@ through feasible combinations of fingerings. The whole passage is solved at
 once with a Viterbi search over finger-pair states (25 states), scored with
 the finger-speed cost below plus penalties for rule violations (same finger
 on different keys, crossings, thumb-to-black, overstretch, re-using a still
-held finger), followed by a greedy repair pass for long held notes.
+held finger), followed by a greedy repair pass for long held notes
+(linear-time `_repair_held`).
+
+Span limits (`MAX_SPAN`/`COMFORT_SPAN`, incl. new thumb rows) are compared as
+raw cm vs `limit * hf`, so hand size matters. Notes carry `INote.midi` plus an
+optional `INote.hint` (pinned finger, `PIN_COST` unless honoured). Chord
+groups use a layered chord DP (Amendment A node cost) for whole-chord
+consistency (`legacy_chord_postpass` flag keeps the legacy candidate pass).
+Phase-2 verdicts: E1 prior validated/OFF, E2 (`V_CAP = 40` + `SEC_SMOOTH = 0.2`
+candidates) unvalidated without PIG, E3/E4 OFF.
+
+PIG evaluation loads ground truth via `load_pig` (`pianoplayer/pigloader.py`,
+chords included, note-weighted average); `PIG2Stream` duplicate-chord
+behaviour is unchanged (CLI/GUI import path only).
 
 One possible advantage of this algorithm over similar ones is that it is completely *dynamic*,
 which means that it
