@@ -41,6 +41,7 @@ from music21.articulations import Fingering
 from pianoplayer.hand import (
     HARD,
     SAME_FINGER_BASE,
+    SAME_FINGER_DX,
     Hand,
     _dt_sec,
 )
@@ -336,7 +337,7 @@ def test_same_finger_over_time():
     print("   same-finger octave after 2 s: cost %.3f (base %.1f)"
           % (soft, SAME_FINGER_BASE))
     check(soft < HARD, "2 s-apart reuse still HARD")
-    check(abs(soft - (SAME_FINGER_BASE + 0.15 * abs(nb.x - na.x))) < 1e-9,
+    check(abs(soft - (SAME_FINGER_BASE + SAME_FINGER_DX * abs(nb.x - na.x))) < 1e-9,
           "soft cost shape wrong: %.3f" % soft)
     # fast reuse: 16ths at 120 bpm (dt = 0.125 s)
     pf = stream.Part()

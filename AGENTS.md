@@ -26,6 +26,7 @@ python test_fingering_spans.py # hand span limits vs limit * hf (size matters)
 python test_fingering_props.py # fingering property checks
 python test_pig_loader.py     # PIG loading via load_pig (chords included)
 python test_fingering_hints.py # INote.hint / PIN_COST hint handling
+python test_fingering_valley.py # broken-chord valley outer-finger + no-reuse (50-nam-ve-sau LH bars)
 python fingering_audit.py     # audit tool for fingering output
 python tune_fingering.py      # tuning tool for fingering weights
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
@@ -90,7 +91,8 @@ costs (`MAX_SPAN`/`COMFORT_SPAN` tables in `handspec.py`, incl. new thumb rows,
 compared as raw cm vs `limit * hf` so hand size matters, quadratic ramp to
 `HARD` beyond max, F4a). Same finger on different keys is HARD only while the first note is
 still held or the gap is at most 0.25 s; slower reuse pays a soft
-`SAME_FINGER_BASE + 0.15 * |dx|` (F3). Non-thumb crossings pay a soft
+`SAME_FINGER_BASE + SAME_FINGER_DX * |dx|` (F3; base 4.0, dx 0.75/cm, so reuse
+across a leap pays leap-proportionally more). Non-thumb crossings pay a soft
 `CROSS_BASE` cost scaling with interval and inverse time (F5); thumb-under
 pays `UNDER[fa]` (after-3 cheapest, halved when departing a black key onto
 white). Thumb-under steps arriving on white ride the hand shift
@@ -109,6 +111,13 @@ re-fingering members, then reports cost delta (F7). It runs in linear time.
 
 **Hints**: `INote.midi` carries the MIDI pitch and `INote.hint` an optional
 pinned finger; pinned notes pay `PIN_COST` unless the solver uses the hint.
+
+**Valley outer-finger bias** (broken-chord lines): a strict local pitch extremum
+with >= `VALLEY_MIN_DEPTH` (2) semitones each side rewards the outer finger
+(LH valley -> 5, peak -> 1; mirrored RH) by
+`VALLEY_BIAS + VALLEY_LEAP_K * (arrival leap - depth)`, capped at
+`VALLEY_BONUS_CAP` (2.0 + 2.0/leap-semitone, cap 15.0) -- a bigger drop means
+the hand repositions, so the outer finger anchors. Chord members never qualify.
 
 **Phase-2 verdicts**: E1 prior validated/OFF, E2 (`V_CAP = 40` +
 `SEC_SMOOTH = 0.2` candidates) unvalidated without PIG, E3/E4 OFF.

@@ -185,6 +185,8 @@ raw cm vs `limit * hf`, so hand size matters. Notes carry `INote.midi` plus an
 optional `INote.hint` (pinned finger, `PIN_COST` unless honoured). Chord
 groups use a layered chord DP (Amendment A node cost) for whole-chord
 consistency (`legacy_chord_postpass` flag keeps the legacy candidate pass).
+Broken-chord valleys/peaks reward the outer finger (leap-scaled, capped);
+slow same-finger reuse on different keys costs base + distance rate.
 Phase-2 verdicts: E1 prior validated/OFF, E2 (`V_CAP = 40` + `SEC_SMOOTH = 0.2`
 candidates) unvalidated without PIG, E3/E4 OFF.
 

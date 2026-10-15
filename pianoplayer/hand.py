@@ -25,8 +25,11 @@ HELD_EPS = 1e-3             # B2: overlap slack in quarter notes.
 SEC_SMOOTH = 0.1            # F1: smoothing term added to dt, in seconds.
 REPEAT_PENALTY = 6.0        # F2: same finger + same key + dt < REPEAT_MAX_DT
 REPEAT_MAX_DT = 0.25        #   adds REPEAT_PENALTY*(MAX_DT-dt)/MAX_DT (s).
-SAME_FINGER_BASE = 2.0      # F3: soft cost of reusing one finger on different
-SAME_FINGER_DX = 0.15       #   keys: BASE + DX*|dx_cm| when dt >= MAX_DT.
+SAME_FINGER_BASE = 4.0      # F3: soft cost of reusing one finger on different
+SAME_FINGER_DX = 0.75       #   keys: BASE + DX*|dx_cm| when dt >= MAX_DT.
+                            #   Round 2: reuse across a leap pays
+                            #   leap-proportionally more (was 0.15; 0.5 left
+                            #   a slow Bb3-G3 1-1 reuse in Tim_Em b.4).
 SAME_FINGER_MAX_DT = 0.25   # F3: faster reuse than this (s) is still HARD.
 FALLBACK_BPM = 120.0        # F1: quarters -> seconds when t_sec is missing
                             # (hand-built INotes that never went through
@@ -35,6 +38,18 @@ PIN_COST = 1000.0           # Phase 4 (§6): added per hinted note (hint in
                             # 1..5) whose finger differs from the hint
                             # (= 5 HARD: a pin loses only to 5+ stacked
                             # violations, never to a mere preference).
+VALLEY_BIAS = 2.0           # Valley outer-finger bias: reward (negative
+                            # cost) for the outer finger on a strict local
+                            # pitch extremum of a broken-chord line (LH:
+                            # minimum -> 5, maximum -> 1; mirrored for RH).
+                            # 0.0 = off.
+VALLEY_MIN_DEPTH = 2        # semitones each side required for the bias.
+VALLEY_LEAP_K = 2.0         # Round 2: extra reward per semitone of arrival
+                            # leap (drop into a valley / rise into a peak)
+                            # beyond VALLEY_MIN_DEPTH -- a bigger leap means
+                            # the hand repositions, so the outer finger
+                            # anchors with less velocity-model resistance.
+VALLEY_BONUS_CAP = 15.0     # Round 2: max total valley reward (magnitude).
 
 # Phase 2 experiments (each OFF until validated per PIANOPLAYER_FINGERING_PLAN
 # §4.0; defaults reproduce current behaviour exactly).
@@ -71,6 +86,61 @@ def _hint_of(note):
     except (ValueError, TypeError):
         return 0
     return h if 1 <= h <= 5 else 0
+
+
+def _valley_bonus(nprev, n, nnext, finger, side):
+    """Outer-finger reward for a broken-chord valley/peak.
+
+    Note `n` (with both neighbours present) that is a strict local pitch
+    minimum gets a reward on the outer finger (LH 5 / RH 1); a strict
+    local maximum gets it on the other outer finger (LH 1 / RH 5).
+    Depth = min(|midi - neighbour|) each side must reach VALLEY_MIN_DEPTH
+    semitones, else 0.0. Round 2: the reward grows with the arrival leap
+    (drop into a valley, rise into a peak -- same constants, symmetric):
+    VALLEY_BIAS + VALLEY_LEAP_K * (leap - VALLEY_MIN_DEPTH), capped at
+    VALLEY_BONUS_CAP magnitude. Chord members never qualify (simultaneous
+    notes have no melodic direction); missing midi (hand-built INotes)
+    also gives 0.0. `side` is "left"/"right" (mirroring-safe: midi-based).
+
+    Shared by the layered-DP node costs and the legacy Viterbi path so
+    both solvers agree; single notes (no both neighbours) get 0.0.
+    """
+    if nprev is None or nnext is None:
+        return 0.0
+    if not VALLEY_BIAS:
+        return 0.0
+    if finger not in (1, 2, 3, 4, 5):
+        return 0.0
+    if getattr(nprev, "isChord", False) or getattr(n, "isChord", False) \
+            or getattr(nnext, "isChord", False):
+        return 0.0
+    mp = getattr(nprev, "midi", None)
+    m = getattr(n, "midi", None)
+    mn = getattr(nnext, "midi", None)
+    if mp is None or m is None or mn is None:
+        return 0.0
+    try:
+        mp, m, mn = int(mp), int(m), int(mn)
+    except (TypeError, ValueError):
+        return 0.0
+    if m < mp and m < mn:
+        if min(mp - m, mn - m) < VALLEY_MIN_DEPTH:
+            return 0.0
+        outer = 5 if side == "left" else 1
+        if finger != outer:
+            return 0.0
+        leap = mp - m  # drop into the valley from the previous note
+    elif m > mp and m > mn:
+        if min(m - mp, m - mn) < VALLEY_MIN_DEPTH:
+            return 0.0
+        outer = 1 if side == "left" else 5
+        if finger != outer:
+            return 0.0
+        leap = m - mp  # rise into the peak from the previous note
+    else:
+        return 0.0
+    bonus = VALLEY_BIAS + VALLEY_LEAP_K * max(0, leap - VALLEY_MIN_DEPTH)
+    return -min(bonus, VALLEY_BONUS_CAP)
 
 
 def _set_fingering(n21, fng, replace=True):
@@ -670,11 +740,18 @@ class Hand:
         # costs). Neighbour transitions stay inter-layer pair_cost
         # (last -> first), so nothing is double-counted.
         node = []
-        for ln, cc, single in zip(layer_notes, cands, is_single):
+        for j, (ln, cc, single) in enumerate(zip(layer_notes, cands,
+                                                 is_single)):
             if single:
                 h0 = _hint_of(ln[0])  # Phase 4 (§6): PIN_COST on a
-                node.append([0.0 if h0 == 0 or c[0] == h0  # mismatch,
-                             else PIN_COST for c in cc])   # once per note
+                # mismatch, once per note, plus the valley outer-finger
+                # bias (needs both neighbours; first/last layer get 0).
+                nprev = layer_notes[j - 1][-1] if j > 0 else None
+                nnext = layer_notes[j + 1][0] if j < L - 1 else None
+                node.append([(0.0 if h0 == 0 or c[0] == h0 else PIN_COST)
+                             + _valley_bonus(nprev, ln[0], nnext, c[0],
+                                             self.LR)
+                             for c in cc])
             else:
                 fit = ln[:5] if len(ln) > 5 else ln
                 costs = []
@@ -802,6 +879,16 @@ class Hand:
                 for fb in fingers:
                     if fb != hb:
                         cost_tables[i][:, fb] += PIN_COST
+            # Valley bias: each interior note's outer-finger reward is
+            # priced exactly once, as the arrival of cost_tables[i]
+            # (notes[0]/notes[-1] have no both neighbours, so get none)
+            # -- the same shared helper as the layered-DP node costs,
+            # so both solvers agree.
+            if i + 2 < n:
+                nprev, ncur, nnext = notes[i], notes[i + 1], notes[i + 2]
+                for fb in fingers:
+                    cost_tables[i][:, fb] += _valley_bonus(
+                        nprev, ncur, nnext, fb, self.LR)
 
         # dp[(fa, fb)]: cheapest cost of a path ending with fa on
         # notes[i-1] and fb on notes[i].
