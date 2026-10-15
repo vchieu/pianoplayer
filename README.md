@@ -150,7 +150,9 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   from the top of the window and touch the landing line `HIT_Y` exactly at
   `t_on`; bars are visible `FALL_SECONDS` (2.2 s) ahead, so
   `LEAD_IN = max(0.8, FALL_SECONDS + 0.2)`; every bar carries its finger
-  number 1-5 as flat quad geometry (not Text3D/texture). Disable with
+  number 1-5 as flat quad geometry (not Text3D/texture); black-key bars ride
+  above white-key bars and left-hand bars above right-hand bars, and any
+  layer error hides it instead of freezing bars. Disable with
   `PIANOPLAYER_FALLING=0`. Geometry is covered by `test_falling.py` and
   the repeat release by `test_repeat_notes.py`;
 - **tempo comes from the score**: every note - including chords - sounds at

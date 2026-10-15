@@ -104,7 +104,9 @@ def place_digit(template, cx, ly0, h, z):
 # --------------------------------------------------------------------------- #
 PARK = (0.0, 0.0, -50.0)    # where unused quads are collapsed (zero area)
 BAR_Z = 0.60                # above the keys' slab, below the digits
-DIGIT_Z = 0.70
+BAR_Z_BLACK = 0.64          # black-key bars ride above white-key bars (x-overlap)
+BAR_Z_LEFT = 0.01           # left-hand bars ride a hair above right-hand bars
+DIGIT_Z = 0.70              # above every bar
 DARK_DIGIT = (0.05, 0.05, 0.07)
 
 
@@ -146,12 +148,17 @@ def _quad_mesh(n_quads, with_rgb):
 
 
 class FallingNotes:
-    """Bars + finger digits above the keys.  Two meshes, zero per-frame allocation."""
+    """Bars + finger digits above the keys.
+
+    Two fixed-capacity meshes, no VTK objects allocated per frame (only
+    small numpy temporaries per note); old quads are parked, then the
+    VTK buffers are flagged Modified()."""
 
     def __init__(self, plotter, top_y, x_of, accent_r, accent_l, key_w,
                  white_w, black_w, capacity=384, seconds=FALL_SECONDS):
         self.vp = plotter
         self.top_y = float(top_y)
+        self.seconds = float(seconds)
         self.speed = fall_speed(self.top_y, HIT_Y, seconds)
         self.x_of = x_of                  # callable(ev) -> world x of its key
         self.col = {"R": np.array(accent_r), "L": np.array(accent_l)}
@@ -172,6 +179,14 @@ class FallingNotes:
     def reset(self):
         self._lo = {}
 
+    def hide(self):
+        """Blank the layer (used when update() fails: no frozen bars)."""
+        for m in (self.bars, self.digs):
+            try:
+                m.actor.SetVisibility(0)
+            except Exception:
+                pass
+
     def update(self, now, players):
         nb = nd = 0
         for p in players:
@@ -183,7 +198,7 @@ class FallingNotes:
             base = self.col[p.side]
             for i in range(lo, len(notes)):
                 e = notes[i]
-                if e.t_on - now > FALL_SECONDS:
+                if e.t_on - now > self.seconds:
                     break                              # sorted by t_on
                 if e.v_off <= now or nb >= self.cap:
                     continue
@@ -193,9 +208,10 @@ class FallingNotes:
                 y0, y1 = ext
                 x = self.x_of(e)
                 hw = 0.5 * (self.black_w if e.black else self.white_w)
+                z = (BAR_Z_BLACK if e.black else BAR_Z) + (BAR_Z_LEFT if p.side == "L" else 0.0)
                 self.bars_p[4 * nb:4 * nb + 4] = (
-                    (x - hw, y0, BAR_Z), (x + hw, y0, BAR_Z),
-                    (x + hw, y1, BAR_Z), (x - hw, y1, BAR_Z))
+                    (x - hw, y0, z), (x + hw, y0, z),
+                    (x + hw, y1, z), (x - hw, y1, z))
                 c = base * (0.78 if e.black else 1.0)
                 self.bars_rgb[4 * nb:4 * nb + 4] = np.clip(c * 255.0 + 0.5, 0, 255).astype(np.uint8)
                 nb += 1

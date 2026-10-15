@@ -64,7 +64,7 @@ __all__ = ["VirtualKeyboard"]
 NR_OCTAVES = 7
 KEY_TOL = 0.12
 FPS_MS = 16               # animation period [ms]
-LEAD_IN = max(0.8, FALL_SECONDS + 0.2)             # s before the first note: hands settle in place
+LEAD_IN = max(0.8, FALL_SECONDS + 0.2)  # s before the first note: hands settle in place
 AIM_LEAD = 0.25           # s ahead at which the hand aims at the next note
 AUDIO_LOOKAHEAD = 1.0      # s of audio events handed to the synth in advance.
                           # Must cover device period + mixer (0.08), the primed
@@ -1187,6 +1187,10 @@ class VirtualKeyboard:
             except Exception:
                 import traceback
                 traceback.print_exc()
+                try:
+                    fall.hide()    # no frozen bars left on screen
+                except Exception:
+                    pass
                 self._fall = None        # never let a cosmetic layer kill playback
         self._hud_update(now)
         self._progress(now)

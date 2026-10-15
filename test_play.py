@@ -100,10 +100,13 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     # as steady-state hold quality.
     press_start = {}
     hold_err = []
+    fall_peak = 0
     while t < seconds:
         clock["t"] = t
         vk._frame(t, dt)
         vk.vp.render()
+        if getattr(vk, "_fall", None) is not None:
+            fall_peak = max(fall_peak, vk._fall._n_bars)
         pressed_peak = max(pressed_peak,
                            sum(1 for v in vk._key_tgt.values() if v > 0))
         for name, amt in vk._key_amt.items():
@@ -146,8 +149,14 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
     print("LH finger_x:", {k: round(v, 2)
                            for k, v in vk.LH._targets_x.items()})
     print("HUD sample:", vk._hud.text() if vk._hud else "(none)")
+    print("falling bars peak:", fall_peak)
 
     ok = True
+    if getattr(vk, "falling", True):
+        if vk._fall is None:
+            print("FAIL: falling layer missing"); ok = False
+        elif fall_peak < 1 and (len(rh.noteseq) or len(lh.noteseq)):
+            print("FAIL: no falling bars drawn"); ok = False
     if sched_err:
         lo, hi = min(sched_err), max(sched_err)
         print("note_on lead time: %.3f .. %.3f s (lookahead %.2f)"

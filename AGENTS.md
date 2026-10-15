@@ -264,7 +264,9 @@ follows `v_off`, abutting bars stay `BAR_GAP` apart. Bars are visible
 `FALL_SECONDS` (2.2 s) ahead, so `LEAD_IN = max(0.8, FALL_SECONDS + 0.2)`.
 Digits 1-5 are flat quad geometry (not Text3D/texture) at the bottom of each
 bar. Fixed-capacity meshes, numpy-view writes + `Modified()` per frame, any
-error disables the layer, never playback. Disable with
+error hides the layer (`hide()`) and disables it, never playback. Black-key
+bars ride above white-key bars and left-hand bars above right-hand bars
+(`BAR_Z`/`BAR_Z_BLACK`/`BAR_Z_LEFT`, digits at `DIGIT_Z`). Disable with
 `PIANOPLAYER_FALLING=0`.
 
 ## Unified skinned hand mesh (Tier B, v2.6.0)
