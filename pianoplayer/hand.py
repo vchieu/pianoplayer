@@ -31,6 +31,10 @@ SAME_FINGER_MAX_DT = 0.25   # F3: faster reuse than this (s) is still HARD.
 FALLBACK_BPM = 120.0        # F1: quarters -> seconds when t_sec is missing
                             # (hand-built INotes that never went through
                             # reader()).
+PIN_COST = 1000.0           # Phase 4 (§6): added per hinted note (hint in
+                            # 1..5) whose finger differs from the hint
+                            # (= 5 HARD: a pin loses only to 5+ stacked
+                            # violations, never to a mere preference).
 
 # Phase 2 experiments (each OFF until validated per PIANOPLAYER_FINGERING_PLAN
 # §4.0; defaults reproduce current behaviour exactly).
@@ -55,6 +59,18 @@ def _dt_sec(na, nb):
     if ta is None or tb is None:
         return abs(nb.time - na.time) * 60.0 / FALLBACK_BPM
     return abs(float(tb) - float(ta))
+
+
+def _hint_of(note):
+    """Pinned finger for a note (Phase 4, §6): 1..5, else 0 (= open).
+
+    `getattr` keeps hand-built notes without a `hint` attribute (and
+    foreign mocks) on the hint-free path, which is bit-identical."""
+    try:
+        h = int(getattr(note, "hint", 0) or 0)
+    except (ValueError, TypeError):
+        return 0
+    return h if 1 <= h <= 5 else 0
 
 
 def _set_fingering(n21, fng, replace=True):
@@ -241,6 +257,17 @@ class Hand:
             if not cands:
                 continue
             k = end - start
+            # Phase 4 (§6): keep only hint-consistent candidates
+            # (fallback: all). Guarded by any-hints, so hint-free
+            # groups behave exactly as before.
+            hints = [_hint_of(notes[start + i]) for i in range(k)]
+            if any(hints):
+                filt = [c for c in cands
+                        if len(c) == k and all(
+                            h == 0 or c[i] == h
+                            for i, h in enumerate(hints))]
+                if filt:
+                    cands = filt
             best, bestc = None, None
             for c in cands:
                 if len(c) != k:
@@ -545,6 +572,26 @@ class Hand:
             members = members[:5]
         return self._chord_finger_candidates(members, limit=None)
 
+    def _hint_consistent_candidates(self, layer_notes, cands):
+        """Phase 4 (§6): keep only candidates matching every hinted
+        chord member; fall back to all candidates when none matches.
+        Hint-free layers return `cands` unchanged (same object: the
+        hint-free path is bit-identical). Members past the first 5
+        (>5-note chords) ride the nearest assigned finger at decode
+        (see `_expand_layer_fingers`), so their hints constrain the
+        assigned finger they ride on (best-effort)."""
+        hints = [_hint_of(m) for m in layer_notes]
+        if not any(hints):
+            return cands
+        fit = layer_notes[:5]
+        extra_ride = [min(range(5),
+                          key=lambda i: (abs(m.x - fit[i].x), i))
+                      for m in layer_notes[5:]]
+        keep = [c for c in cands
+                if all(h == 0 or c[j if j < 5 else extra_ride[j - 5]] == h
+                       for j, h in enumerate(hints))]
+        return keep or cands
+
     def _layer_held_extra(self, Anotes, candA, Bnotes, candB):
         """HARD per held-finger violation over ALL note pairs across two
         adjacent layers, EXCEPT (last of A, first of B), which
@@ -602,13 +649,20 @@ class Hand:
         if n == 0:
             return []
         if n == 1:
-            return [3]
+            h0 = _hint_of(notes[0])  # Phase 4 (§6): a pinned lone note
+            return [h0 or 3]         # takes its hint, else finger 3
         layers = self._build_layers(notes)
         L = len(layers)
         layer_notes = [notes[s:e] for s, e in layers]
         cands = [self._layer_candidates(ln) for ln in layer_notes]
         is_single = [len(ln) == 1 and not ln[0].isChord
                      for ln in layer_notes]
+        # Phase 4 (§6): chord layers keep only hint-consistent
+        # candidates (fallback: all). Single-note layers price the
+        # mismatch in their node cost below (once per note, first
+        # layer included via the dp init).
+        cands = [cc if single else self._hint_consistent_candidates(ln, cc)
+                 for ln, cc, single in zip(layer_notes, cands, is_single)]
         # Node costs: chord-layer interior objective (Amendment A) =
         # _static_chord_cost + internal consecutive pair_cost between
         # adjacent chord members -- exactly the validated
@@ -618,7 +672,9 @@ class Hand:
         node = []
         for ln, cc, single in zip(layer_notes, cands, is_single):
             if single:
-                node.append([0.0] * len(cc))
+                h0 = _hint_of(ln[0])  # Phase 4 (§6): PIN_COST on a
+                node.append([0.0 if h0 == 0 or c[0] == h0  # mismatch,
+                             else PIN_COST for c in cc])   # once per note
             else:
                 fit = ln[:5] if len(ln) > 5 else ln
                 costs = []
@@ -718,7 +774,8 @@ class Hand:
         if n == 0:
             return []
         if n == 1:
-            return [3]
+            h0 = _hint_of(notes[0])  # Phase 4 (§6): as in solve_layered
+            return [h0 or 3]
         
         # F4b: Precompute chord candidates
         self._precompute_chord_candidates(notes)
@@ -733,8 +790,19 @@ class Hand:
                 for fb in range(1, 6):
                     table[fa, fb] = self.pair_cost(na, fa, nb, fb)
             cost_tables.append(table)
-        
+
         fingers = (1, 2, 3, 4, 5)
+        # Phase 4 (§6): PIN_COST for any transition whose finger for a
+        # hinted note differs from the hint. notes[0] is priced via the
+        # dp init below; notes[i+1] via cost_tables[i] (each hinted
+        # note exactly once, so hint-free tables are untouched).
+        for i in range(n - 1):
+            hb = _hint_of(notes[i + 1])
+            if hb:
+                for fb in fingers:
+                    if fb != hb:
+                        cost_tables[i][:, fb] += PIN_COST
+
         # dp[(fa, fb)]: cheapest cost of a path ending with fa on
         # notes[i-1] and fb on notes[i].
         dp = {}
@@ -742,9 +810,12 @@ class Hand:
         # Stronger preference to overcome the pairwise cost advantage of starting on 2/3
         # Left hand needs even stronger preference for pinky to avoid thumb-start traps
         start_pref = START_PREF_RIGHT if self.LR == "right" else START_PREF_LEFT
+        h0 = _hint_of(notes[0])
         for fa in fingers:
             for fb in fingers:
-                dp[(fa, fb)] = cost_tables[0][fa, fb] + start_pref.get(fa, 0.0)
+                dp[(fa, fb)] = (cost_tables[0][fa, fb]
+                                + start_pref.get(fa, 0.0)
+                                + (0.0 if h0 == 0 or fa == h0 else PIN_COST))
 
         back = {1: {k: k[0] for k in dp}}
         for i in range(2, n):
@@ -801,6 +872,8 @@ class Hand:
             if f[i] not in (1,2,3,4,5):
                 continue
             bi = notes[i]
+            if _hint_of(bi):
+                continue  # Phase 4 (§6): pinned notes keep their finger
             bi_end = bi.time_real + max(bi.dur_real, 0.0)
             blocked = set()
             for j in range(i):
@@ -908,6 +981,11 @@ class Hand:
                       if notes[j].time_real + max(notes[j].dur_real, 0.0)
                       > bi.time_real + HELD_EPS]
             if f[i] not in (1,2,3,4,5):
+                active.append(i)
+                continue
+            if _hint_of(bi):
+                # Phase 4 (§6): pinned notes keep their finger, but
+                # they still sound, so they still block the others.
                 active.append(i)
                 continue
             blocked = set()
@@ -1133,7 +1211,8 @@ class Hand:
             return
 
         if len(kept) == 1:
-            fingers = [3]
+            h0 = _hint_of(self.noteseq[kept[0]])  # Phase 4 (§6): pinned
+            fingers = [h0 or 3]                  # lone note takes hint
         else:
             sub = [self.noteseq[i] for i in kept]
             fingers = self.solve_viterbi(sub)

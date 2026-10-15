@@ -30,6 +30,10 @@ class INote:
                                      # None = unstamped: _dt_sec falls back to
                                      # quarters at FALLBACK_BPM (hand.py)
         self.fingering= 0
+        self.hint     = 0   # pinned-fingering hint from a score lyric
+                            # (1..5; 0 = open). Phase 4 (§6): generate()
+                            # never writes here (it writes `fingering`),
+                            # so a second generate() run stays idempotent.
         self.measure  = 0
         self.chordnr  = 0
         self.NinChord = 0
@@ -132,6 +136,7 @@ def reader(sf, beam=0, tempo_map=None):
                 except (ValueError, TypeError):
                     lv = 0
                 an.fingering = lv if 1 <= lv <= 5 else 0
+                an.hint = lv if 1 <= lv <= 5 else 0
             if tie is not None and tie.type == 'start':
                 pending[midi] = an
             noteseq.append(an)
@@ -149,6 +154,29 @@ def reader(sf, beam=0, tempo_map=None):
                 kept.append((cn, noteobj, midi, tie))
             if not kept:
                 continue
+
+            # Pinned-fingering hints (Phase 4, §6): a chord carries its
+            # lyrics on the chord object, not on the pitches, so match
+            # them to members positionally in lyric-number descending
+            # order. This round-trips generate()'s own writer, which
+            # stores member `chordnr` under lyric number N - chordnr.
+            # A chord with a single shared lyric therefore pins only
+            # its lowest pitch (chordnr 0); members without a lyric
+            # keep hint 0. Non-numeric lyrics pin nothing.
+            chord_hints = []
+            try:
+                ordered = sorted(n.lyrics,
+                                 key=lambda l: -(int(l.number)
+                                                 if l.number is not None
+                                                 else 0))
+            except (ValueError, TypeError):
+                ordered = list(n.lyrics)
+            for ly in ordered:
+                try:
+                    v = int(str(ly.text).strip())
+                except (ValueError, TypeError):
+                    v = 0
+                chord_hints.append(v if 1 <= v <= 5 else 0)
 
             for j, (cn, noteobj, midi, tie) in enumerate(kept):
                 an          = INote()
@@ -173,6 +201,7 @@ def reader(sf, beam=0, tempo_map=None):
                 an.time_real = off
                 an.dur_real  = ql
                 an.isBlack  = cn.pitchClass in (1, 3, 6, 8, 10)
+                an.hint = chord_hints[j] if j < len(chord_hints) else 0
                 if tie is not None and tie.type == 'start':
                     pending[midi] = an
                 noteseq.append(an)
