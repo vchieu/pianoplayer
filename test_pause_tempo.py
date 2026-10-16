@@ -69,8 +69,24 @@ def test_space_toggles_pause():
     check(vk._paused is False, "starts unpaused")
     vk._on_keypress(FakeKey("space"))
     check(vk._paused is True, "space pauses")
+    # a deliberate second press comes much later than the debounce window
+    # (auto-repeat while held arrives ~30 ms apart and is ignored: P4)
+    vk._last_key_at["space"] -= 1.0
     vk._on_keypress(FakeKey("space"))
     check(vk._paused is False, "space resumes")
+    vk._playing = False
+
+
+def test_space_hold_does_not_flicker():
+    """Holding Space (auto-repeat ~30 ms apart) must flip pause only once."""
+    vk = make_vk()
+    vk._on_keypress(FakeKey("space"))
+    check(vk._paused is True, "first press pauses")
+    vk._on_keypress(FakeKey("space"))       # immediate repeat: held key
+    vk._on_keypress(FakeKey("space"))
+    check(vk._paused is True, "held space flickered pause off")
+    vk.toggle_pause()                        # direct resume for cleanup
+    check(vk._paused is False, "direct resume works")
     vk._playing = False
 
 
@@ -154,6 +170,72 @@ def test_hud_paused_and_bpm():
     vk._hud_update(0.0)
     txt = vk._hud.text() if vk._hud else ""
     check("PAUSED" in txt, "HUD shows PAUSED, got %r" % txt)
+    vk.toggle_pause()
+    vk._playing = False
+
+
+def test_pause_drops_queued_audio():
+    """Notes queued in the synth must not sound during a pause (P1)."""
+    from pianoplayer.audio import SynthCore
+    import numpy as np
+    core = SynthCore()
+    core.note_on(60, 0.8, when=1.0)
+    core.note_off(60, when=1.5)
+    core.note_on(64, 0.8, when=2.0)
+    core.drop_scheduled()
+    out = np.concatenate([core.render_block(4096) for _ in range(40)])  # ~3.7 s
+    check(float(np.abs(out).max()) < 1e-6, "queued notes still sounded")
+    # all_notes_off + drop: a sounding voice is released, not kept
+    core2 = SynthCore()
+    core2.note_on(60, 0.8, when=0.0)
+    core2.render_block(2048)
+    core2.all_notes_off()
+    core2.drop_scheduled()
+    tail = np.concatenate([core2.render_block(4096) for _ in range(40)])
+    check(float(np.abs(tail[-8192:]).max()) < 1e-3, "voice was not damped")
+
+
+def test_pause_rewinds_sched_and_resends():
+    """After pause+resume the pending notes are re-sent with the new epoch (P1)."""
+    class Eng:
+        underruns = 0
+        output_latency = 0.0
+        now = 0.0
+        def __init__(self): self.sent = []; self.dropped = 0; self.off_all = 0
+        def pump(self, *a, **k): return 0
+        def note_on(self, midi, vel, when=None, pan=0.0): self.sent.append((midi, when))
+        def note_off(self, midi, when=None): pass
+        def all_notes_off(self): self.off_all += 1
+        def drop_scheduled(self): self.dropped += 1
+        def shift_pending(self, d): return 0
+    vk = make_vk()
+    eng = Eng()
+    vk.engine = eng
+    vk._engine_wall = vk._t0 - 2.4
+    p = vk._players["R"]
+    now, dt = -2.4, 1.0 / 60.0
+    for _ in range(90):
+        vk._frame(now, dt); now += dt
+    check(p.sched > p.fire, "scenario needs queued-but-unfired notes")
+    n_before = len(eng.sent)
+    vk.toggle_pause()
+    check(eng.dropped == 1 and eng.off_all == 1, "pause must damp + drop")
+    check(p.sched == p.fire, "sched not rewound to fire")
+    vk._pause_started -= 0.5            # pretend 0.5 s passed
+    vk.toggle_pause()
+    vk._frame(now, dt)
+    resent = eng.sent[n_before:]
+    check(len(resent) >= 1, "queued notes were not re-sent after resume")
+    vk._playing = False
+
+
+def test_paused_tick_shows_paused_hud():
+    """The live paused loop (not just _hud_update) must show PAUSED (P3)."""
+    vk = make_vk()
+    vk.toggle_pause()
+    vk._paused_tick()
+    txt = vk._hud.text() if vk._hud else ""
+    check("PAUSED" in txt, "HUD after paused tick: %r" % txt)
     vk.toggle_pause()
     vk._playing = False
 

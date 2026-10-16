@@ -167,8 +167,12 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
 - **HUD** (top left) shows elapsed/total time, current measure and the
   effective tempo in BPM, plus a progress strip along the fall line;
 - **Space pauses** the player: the frame freezes while `q`/Esc still quit;
-  on resume score time continues exactly where it stopped (ringing notes
-  decay naturally);
+  pausing damps the synth (`all_notes_off` + `drop_scheduled`) and rewinds
+  each hand's schedule so the pending notes are re-sent on resume (no early
+  sound, no silent key presses); the audio ring keeps being pumped while
+  paused, the HUD shows `PAUSED` live, and holding Space does not
+  auto-repeat. On resume score time continues exactly where it stopped
+  (ringing notes decay naturally);
 - **sound stays glued to the picture**: the synth clock is monotonic, the
   output latency is re-measured every frame, and already-scheduled notes are
   shifted when the latency grows mid-playback. If your machine still shows a

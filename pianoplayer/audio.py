@@ -349,6 +349,26 @@ class SynthCore:
             heapq.heapify(self._events)
         return len(queued) + len(self._events)
 
+    def drop_scheduled(self):
+        """Forget every scheduled note on/off (kinds 0 and 1).
+
+        Kind 2 events (release-by-start, produced by `all_notes_off`) are
+        kept so a preceding `all_notes_off()` still damps the sounding
+        voices.  Used by the player's pause (P1).
+        """
+        kept = []
+        try:
+            while True:
+                ev = self._pending.get_nowait()
+                if ev[2] == 2:
+                    kept.append(ev)
+        except queue.Empty:
+            pass
+        for ev in kept:
+            self._pending.put(ev)
+        self._events = [ev for ev in self._events if ev[2] == 2]
+        heapq.heapify(self._events)
+
     def _mix(self, out, offset, length):
         if length <= 0:
             return
@@ -909,6 +929,18 @@ class SoundEngine:
             return int(self.synth.shift_pending(delta_sec))
         except Exception:
             return 0
+
+    def drop_scheduled(self):
+        """Forget all scheduled (not yet rendered) note events (pause)."""
+        lock = getattr(self._backend, "_render_lock", None)
+        try:
+            if lock is not None:
+                with lock:              # no renderer may drain the queue meanwhile
+                    self.synth.drop_scheduled()
+            else:
+                self.synth.drop_scheduled()
+        except Exception:
+            pass
 
     # ----------------------------------------------------------- offline
     def render(self, events, seconds) -> np.ndarray:

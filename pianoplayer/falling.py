@@ -10,7 +10,7 @@ MIN_BAR = 0.45          # cm, shortest bar drawn
 LABEL_H = 1.7           # cm, finger digit height
 MIN_LABEL_H = 0.7
 LABEL_PAD = 0.15        # cm between bar edge and digit
-STROKE = 0.075          # digit stroke half-width as a fraction of digit height
+STROKE = 0.09          # digit stroke half-width as a fraction of digit height
 DIGIT_W = 0.62          # digit width / height
 
 # polylines in a unit box, x right, y DOWN (as a font designer would draw)
@@ -71,18 +71,23 @@ def digit_template(d):
     out = np.zeros((MAX_QUADS * 4, 2))
     k = 0
     t = STROKE
+    # NOTE: segment quads are CW, joint squares CCW; irrelevant while the
+    # actor has lighting off and no backface culling.
+    asp = np.array([DIGIT_W, 1.0])            # world aspect of the glyph box
     for line in _STROKES.get(int(d), []):
-        pts = np.array([(x, 1.0 - y) for x, y in line])
+        pts = np.array([(x, 1.0 - y) for x, y in line]) * asp   # aspect space
         for a, b in zip(pts[:-1], pts[1:]):
             v = b - a
             n = float(np.hypot(*v))
             nx, ny = -v[1] / n * t, v[0] / n * t
-            out[4 * k:4 * k + 4] = [a + (nx, ny), b + (nx, ny),
-                                    b - (nx, ny), a - (nx, ny)]
+            quad = np.array([a + (nx, ny), b + (nx, ny),
+                             b - (nx, ny), a - (nx, ny)])
+            out[4 * k:4 * k + 4] = quad / asp                   # back to unit box
             k += 1
         for c in pts[1:-1]:
-            out[4 * k:4 * k + 4] = [c + (-t, -t), c + (t, -t),
-                                    c + (t, t), c + (-t, t)]
+            quad = np.array([c + (-t, -t), c + (t, -t),
+                             c + (t, t), c + (-t, t)])
+            out[4 * k:4 * k + 4] = quad / asp
             k += 1
     assert k <= MAX_QUADS, k
     if k < MAX_QUADS:
@@ -207,6 +212,8 @@ class FallingNotes:
                     continue
                 y0, y1 = ext
                 x = self.x_of(e)
+                if x is None:
+                    continue
                 hw = 0.5 * (self.black_w if e.black else self.white_w)
                 z = (BAR_Z_BLACK if e.black else BAR_Z) + (BAR_Z_LEFT if p.side == "L" else 0.0)
                 self.bars_p[4 * nb:4 * nb + 4] = (

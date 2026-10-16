@@ -81,6 +81,9 @@ TAU_RELEASE = 0.032       # ... while releasing [s]
 # key/finger travel lands with the heard attack.  Audio scheduling
 # (AUDIO_LOOKAHEAD loop) and releases stay on true score time.
 PRESS_LEAD = 0.025        # press lead compensating visual travel time [s]
+KEY_DEBOUNCE = 0.30       # s: same-key presses faster than this are ignored
+                          # (P4: key auto-repeat while held arrives ~30 ms
+                          # apart; deliberate presses are much slower)
 HUD_PERIOD = 0.25         # s between HUD refreshes
 SUSTAIN_LEGATO = 0.15    # s a note rings longer when the next one overlaps
                          # it (simple sustain pedal, C8)
@@ -419,6 +422,18 @@ class VirtualKeyboard:
             sym = obj.GetKeySym()
         except Exception:
             return
+        try:
+            now_k = _time.perf_counter()
+        except Exception:
+            now_k = 0.0
+        # P4: ignore auto-repeat while a key is held down.  VTK's
+        # GetRepeatCount() reads 1 even for the first press on some builds,
+        # so it cannot tell a hold from a press -- debounce by time instead
+        # (repeats arrive ~30 ms apart, deliberate presses much slower).
+        last = self.__dict__.setdefault("_last_key_at", {})
+        if now_k - last.get(sym, -1e9) < KEY_DEBOUNCE:
+            return
+        last[sym] = now_k
         if sym in ("v", "V"):
             self.toggle_view()
         elif sym in ("space", "Space"):
@@ -439,6 +454,17 @@ class VirtualKeyboard:
         self._paused = not getattr(self, "_paused", False)
         if self._paused:
             self._pause_started = _t.perf_counter()
+            eng = self.engine
+            if eng is not None:
+                try:
+                    eng.all_notes_off()               # damp what rings
+                    fn = getattr(eng, "drop_scheduled", None)
+                    if callable(fn):
+                        fn()                          # forget queued notes
+                except Exception:
+                    pass
+            for p in self._players.values():
+                p.sched = p.fire                      # re-send them after resume
         else:
             d = _t.perf_counter() - getattr(self, "_pause_started", 0.0) or 0.0
             if d > 0:
@@ -978,7 +1004,7 @@ class VirtualKeyboard:
                 # all fired/scheduled state stand still.  The synth's fallback
                 # feeder keeps rendering, so ringing voices decay naturally.
                 try:
-                    vp.render()
+                    self._paused_tick()
                 except Exception:
                     break
                 frame += 1
@@ -1237,6 +1263,20 @@ class VirtualKeyboard:
                         sent[i] = want
                         e._sent_when = want
                         break
+
+    def _paused_tick(self):
+        """One frame while paused: keep audio fed, refresh the HUD, redraw."""
+        eng = self.engine
+        if eng is not None:
+            try:
+                eng.pump()
+            except Exception:
+                pass
+        try:
+            self._hud_update(getattr(self, "_prev_now", 0.0))   # P3
+        except Exception:
+            pass
+        self.vp.render()
 
     def _on_timer(self, evt=None):
         if not self._playing or self.vp is None:

@@ -192,6 +192,9 @@ Hand span (`size` `XXS`..`XXL`) scales `frest` (rest finger positions) by
   retroactively moves all scheduled-but-unrendered note on/off events by the
   delta (test doubles without it get `_retime_pending`, which rewrites
   pending `_Ev._sent_when` entries), so already-queued notes stay in sync.
+  `SynthCore.drop_scheduled()` / `SoundEngine.drop_scheduled()` forget all
+  scheduled (not yet rendered) note on/off events while keeping kind-2
+  damping events -- used by pause (`all_notes_off()` first, then drop).
   `AUDIO_LOOKAHEAD` (1.0 s) must
   cover device period + mixer + ring cushion + a stalled frame.
 - Manual A/V trim: `VirtualKeyboard.av_offset` (s; >0 = sound later than
@@ -219,8 +222,17 @@ orthographic top-down view (`_lock_camera` swaps the interactor style); the
 `v` key flips to a ~55° perspective view and back, `Space` (`toggle_pause`)
 freezes score time by skipping `_on_timer()` while still pumping events +
 re-rendering the frozen frame, shifting `_t0`/`_audio_epoch` forward by the
-paused span on resume (fired flags prevent double-fire; ringing voices decay
-via the synth fallback feeder). HUD shows effective BPM (`tempo*speedfactor`,
+paused span on resume (fired flags prevent double-fire). Pausing also damps
+the synth (`all_notes_off()` then `SynthCore`/`SoundEngine.drop_scheduled()`,
+which forgets every queued note on/off but keeps the kind-2 damping events)
+and rewinds each player's `p.sched` to `p.fire`, so after resume `_pump()`
+re-sends the pending notes with the shifted epoch (no early sound, no silent
+key presses; the already-rendered ring cushion of up to ~0.4 s is left alone
+and still heard). While paused each frame runs `_paused_tick()`, which keeps
+`engine.pump()` feeding the ring, refreshes the HUD (so `PAUSED` is visible
+live), and re-renders; same-key presses faster than `KEY_DEBOUNCE` (0.30 s)
+are ignored so holding Space flips pause only once (`GetRepeatCount()` reads
+1 even for the first press on some VTK builds, so it cannot be used). HUD shows effective BPM (`tempo*speedfactor`,
 `effective_bpm()`) and `PAUSED`. All clocks are monotonic
 (`perf_counter` for `_t0`, `engine_wall`, pump deadlines -- no `time.time()`
 anywhere in the `_t0` family).
@@ -372,8 +384,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.9.0'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.9.0"`).
+  `setup.py` (`version='2.9.1'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.9.1"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).
