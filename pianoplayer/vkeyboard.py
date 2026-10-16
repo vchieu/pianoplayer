@@ -1319,6 +1319,12 @@ class VirtualKeyboard:
     def _on_timer(self, evt=None):
         if not self._playing or self.vp is None:
             return
+        if getattr(self, "_ended", False):
+            try:
+                self._paused_tick()
+            except Exception:
+                pass
+            return
         try:
             t = _time.perf_counter()
             dt = t - self._last

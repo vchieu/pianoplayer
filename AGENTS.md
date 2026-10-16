@@ -304,7 +304,7 @@ constant `tempo` is used. Playback rate only ever flows through
 `speedfactor` (`set_tempo_bpm`/`effective_bpm()`): the tempo popup
 (`prompt_tempo`, tkinter.simpledialog, score BPM as default, skipped when
 offscreen, `--tempo` given, or `PIANOPLAYER_TEMPO_POPUP=0`) and the CLI
-`--tempo BPM` flag (multiplies `--vedo-speed`) never touch A/V sync math. While a finger holds a key, that finger stays
+`--tempo BPM` flag (multiplies `--vedo-speed`) never touch A/V sync math. When the piece ends the score clock freezes at the total and the window stays open until the user closes it. While a finger holds a key, that finger stays
 exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
 the next note. Visual presses fire `PRESS_LEAD = 0.025` s early so the
 key/finger travel lands with the heard attack (audio scheduling stays on
@@ -389,8 +389,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.9.2'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.9.2"`).
+  `setup.py` (`version='2.9.3'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.9.3"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

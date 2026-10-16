@@ -311,6 +311,26 @@ def test_paused_tick_shows_paused_hud():
     vk._playing = False
 
 
+def test_clock_freezes_at_end():
+    """After _ended the score clock freezes: _on_timer feeds audio/HUD
+    via _paused_tick but never advances _prev_now (no PAUSED text)."""
+    vk = make_vk()
+    now, dt = -2.4, 1.0 / 60.0
+    while not getattr(vk, "_ended", False) and now < 30.0:
+        vk._frame(now, dt)
+        now += dt
+    check(getattr(vk, "_ended", False), "score never ended")
+    frozen = vk._prev_now
+    time.sleep(0.25)
+    vk._on_timer()
+    vk._on_timer()
+    check(vk._prev_now == frozen, "clock moved after end: %r -> %r"
+          % (frozen, vk._prev_now))
+    txt = vk._hud.text() if vk._hud else ""
+    check("PAUSED" not in txt, "PAUSED shown after end, got %r" % txt)
+    vk._playing = False
+
+
 # ---- C: tempo -----------------------------------------------------------
 def test_tempo_math():
     vk = make_vk(tempo_bpm=120.0)

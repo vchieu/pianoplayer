@@ -163,7 +163,8 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   and sound. At playback start a popup offers the score's BPM as the
   default (OK keeps it, typing a number rescales via `speedfactor`);
   `--tempo BPM` sets it non-interactively (skips the popup) and
-  `PIANOPLAYER_TEMPO_POPUP=0` disables the popup;
+  `PIANOPLAYER_TEMPO_POPUP=0` disables the popup; when the piece ends the
+  score clock freezes at the total and the window stays open;
 - **HUD** (top left) shows elapsed/total time, current measure and the
   effective tempo in BPM, plus a progress strip along the fall line;
 - **Space pauses** the player: the frame freezes while `q`/Esc still quit;
