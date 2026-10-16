@@ -122,6 +122,13 @@ GOLD_EXTRA = [
     ("Chromatic R (12 notes)",
      ["C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4"],
      "right", [1, 3, 1, 3, 1, 1, 3, 1, 3, 1, 3, 1]),
+    # Figure-lite round: broken octaves + triad arpeggio (textbook wants).
+    ("Broken octaves R",
+     ["C4", "C5", "D4", "D5", "E4", "E5"],
+     "right", [1, 5, 1, 5, 1, 5]),
+    ("C triad arp R (1 oct+)",
+     ["C4", "E4", "G4", "C5", "E5", "G5"],
+     "right", [1, 2, 3, 1, 2, 3]),
 ]
 
 

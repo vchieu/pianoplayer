@@ -322,15 +322,50 @@ UNDER = {2: 3.0, 3: 1.0, 4: 8.0, 5: 9.0}  # thumb-under cost after finger:
 
 # F6: static black/white preference per finger (added to pair_cost, not
 # multiplied by velocity).  Positive = penalty for black keys.
-BLACK_COST = {1: 0.5, 2: 0.1, 3: 0.0, 4: 0.1, 5: 0.3}
+# Figure-lite round (learned direction: thumb_black 1.92 -> 0.24, pinky up):
+# thumb 0.5 -> 0.25, pinky 0.3 -> 0.35.
+BLACK_COST = {1: 0.25, 2: 0.1, 3: 0.0, 4: 0.1, 5: 0.35}
 WHITE_COST = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+
+# Figure-lite: one finger covering two neighbouring keys inside a chord
+# (soft: the hand really can do it) -- HARD otherwise.
+THUMB_DOUBLE = 7.0
+PINKY_DOUBLE = 8.0
+# Figure-lite: octave (or wider) on 1-4 with an inner note held down --
+# 1-5 opens the hand, so 1-4 pays this (soft, physical limits still win).
+INNER_ROOM_14 = 4.0
+
+# Procedural skin texture (handmesh.build_skin_texture). 512 default;
+# PIANOPLAYER_TEXSIZE=1024 selects the hi-res variant (own cache file).
+TEX_VERSION = "v3"
+TEX_SIZE_DEFAULT = 512
+
+# Cheap skin material (hand3d._SKIN_*): softer wrap-style response --
+# ambient up, diffuse down slightly, visible specular highlight.
+SKIN_AMBIENT = 0.45
+SKIN_DIFFUSE = 0.65
+SKIN_SPECULAR = 0.15
+SKIN_SHININESS = 24.0
+
+# Cheap motion flavour (hand3d.update, all visual-only, IK stays exact):
+# wrist bounce on quick re-strikes, idle wander, sympathy dip, white-key
+# area ride and loudness (mean-press) wrist lift.
+BOUNCE_LIFT = 0.25      # cm root-z kick on a quick re-press
+BOUNCE_TAU = 0.18       # ... decay [s]
+WANDER_AMP = 0.05       # cm idle-finger x wander amplitude
+WANDER_FREQ = 0.23      # ... [Hz]
+SYMPATHY_DIP = 0.10     # cm idle neighbour dips per adjacent press
+WHITE_RIDE = 0.15       # cm idle fingers ride higher over black-key areas
+LOUD_LIFT = 0.12        # cm root-z lift per mean press (effort)
 
 
 def geom_hash():
     """8-char sha1 over geometry + SDF constants + grid + version (R1.4).
 
     NOTE: the hash covers GEOMETRY constants only. Fingering cost tables
-    (MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST)
+    (MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST,
+    THUMB_DOUBLE, PINKY_DOUBLE, INNER_ROOM_14) and look/motion constants
+    (TEX_*, SKIN_*, BOUNCE_*, WANDER_*, SYMPATHY_DIP, WHITE_RIDE, LOUD_LIFT)
     are deliberately EXCLUDED: retuning them must not invalidate the mesh
     cache. Geometry LOGIC changes (e.g. a rest_chains formula or coupling
     edit) are invisible to it -- bump HANDMESH_VERSION manually with every

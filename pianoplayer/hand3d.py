@@ -196,9 +196,11 @@ _CHASE_ERR = 0.1
 _COINCIDE_SEP = 1.4
 _COINCIDE_LIFT = 0.8
 # D6: looks -- skin material, joint shading, blob shadows.
-_SKIN_AMBIENT = 0.40
-_SKIN_DIFFUSE = 0.70
-_SKIN_SPECULAR = 0.08
+# (single source: handspec SKIN_*; wrap-style soft response, cheap.)
+_SKIN_AMBIENT = _HS.SKIN_AMBIENT
+_SKIN_DIFFUSE = _HS.SKIN_DIFFUSE
+_SKIN_SPECULAR = _HS.SKIN_SPECULAR
+_SKIN_SHININESS = _HS.SKIN_SHININESS
 # H3: whole-hand blob shadows: one black projector-decal actor per arm mesh,
 # sharing its dataset (no geometry copy).  The user matrix flattens the arm
 # onto the plane z' = _SHADOW_Z with a slight light offset (PROJ @ arm
@@ -209,7 +211,7 @@ _SKIN_SPECULAR = 0.08
 # ten times the H4 budget.  Opaque is depth-correct everywhere and cheap;
 # black stays invisible on black keys.  Hidden in perspective view.
 _SHADOW_OFF = (0.35, -0.35)  # offset from the true position, toward the light
-_SHADOW_COL = (0.04, 0.025, 0.025)
+_SHADOW_COL = (0.055, 0.035, 0.035)  # softened: lighter than pure-black blob
 _SHADOW_Z = 1.6              # fixed projection plane, just above black keys
 # H3: fingertip contact AO baked into the finger vertex colours (grounds the
 # fingertip where it meets the key; no actor, no depth involved).
@@ -401,6 +403,10 @@ def _material(mesh, ambient, diffuse, specular):
         p.SetAmbient(ambient)
         p.SetDiffuse(diffuse)
         p.SetSpecular(specular)
+        try:
+            p.SetSpecularPower(_SKIN_SHININESS)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -638,6 +644,11 @@ class HandRig:
         self._pitch_target = self.PITCH
         # R5.6: tendon lift state per finger
         self._tendon_lift = {f: 0.0 for f in FINGERS}
+        # Figure-lite motion flavour (visual only): wrist bounce on quick
+        # re-strikes + last-release clock per finger.
+        self._bounce = 0.0
+        self._last_release = {f: -1e9 for f in FINGERS}
+        self._prev_press = {f: 0.0 for f in FINGERS}
 
         self._build()
 
@@ -794,26 +805,37 @@ class HandRig:
             pass
         tpath = self.texture_path
         if tpath is None:
-            # Try package data first
+            import os as _os2
+            try:
+                _sz = int(_os2.environ.get("PIANOPLAYER_TEXSIZE", "512"))
+            except ValueError:
+                _sz = 512
+            self._tex_size = _sz if _sz in (512, 1024) else 512
+            # Try package data first (versioned names, either resolution)
             hf_s = f"{float(self.hf):.2f}"
             hash8 = _HS.geom_hash()[:8]
-            pkg_tex = f"handtex_{self.side}_{hf_s}_{hash8}.png"
             try:
                 from importlib.resources import files as _files
-                pkg_path = _files("pianoplayer.data").joinpath(pkg_tex)
-                if pkg_path.is_file():
-                    tpath = str(pkg_path)
+                for _sz_try in (self._tex_size, 512, 1024):
+                    pkg_tex = (f"handtex_{self.side}_{hf_s}_{hash8}_"
+                               f"{_HS.TEX_VERSION}{_sz_try}.png")
+                    pkg_path = _files("pianoplayer.data").joinpath(pkg_tex)
+                    if pkg_path.is_file():
+                        tpath = str(pkg_path)
+                        break
             except Exception:
                 pass
         if tpath is None:
             from pianoplayer.handmesh import texture_path as _default_tex
-            tpath = _default_tex(self.hf, self.side)
+            tpath = _default_tex(self.hf, self.side,
+                                 size=getattr(self, "_tex_size", 512))
         _tex_ok = False
         try:
             import os as _os
             if not _os.path.isfile(tpath):
                 build_skin_texture(rest, bones, tpath, names=names,
-                                   hf=self.hf, side=self.side)
+                                   hf=self.hf, side=self.side,
+                                   size=getattr(self, "_tex_size", 512))
             from PIL import Image as _Image
             with _Image.open(tpath) as _im:
                 _im.verify()  # garbage file -> raise -> keep SKIN below
@@ -1531,7 +1553,34 @@ class HandRig:
         # Compute any_black early for R5.5 pitch
         any_black = black_pressed if advance_black is None else (
             black_pressed or bool(advance_black))
-        
+
+        # ---- motion flavour (visual only, IK targets stay reachable) ----
+        # wrist bounce: a quick re-strike (release -> press within 0.25 s)
+        # kicks the wrist up briefly, like a repeated-chord bounce.
+        for f in FINGERS:
+            a_now = float(press.get(f, 0.0))
+            a_prev = float(self._prev_press.get(f, 0.0))
+            if a_now < 0.5:
+                self._last_release[f] = self._t
+            elif a_prev < 0.5 and (self._t - self._last_release[f]) < 0.25:
+                self._bounce = 1.0
+            self._prev_press[f] = a_now
+        self._bounce *= math.exp(-dt / _HS.BOUNCE_TAU)
+        # idle fingers: wander + sympathy dip with pressing neighbours +
+        # white-key-area ride (fingers among black keys sit higher).
+        for f in list(targets.keys()):
+            a_f = float(press.get(f, 0.0))
+            if f in held or f in aim_set or a_f > 0.5:
+                continue
+            x, y, z, a = targets[f]
+            x += (_HS.WANDER_AMP * self.hf
+                  * math.sin(2.0 * math.pi * _HS.WANDER_FREQ * self._t
+                             + _BREATHE_PHASE[f]))
+            dip = _HS.SYMPATHY_DIP * max(
+                [float(press.get(g, 0.0))
+                 for g in (f - 1, f + 1) if 1 <= g <= 5] + [0.0])
+            z = z - dip + (_HS.WHITE_RIDE if any_black else 0.0)
+            targets[f] = (x, y, z, a)
         # ---- R5.5: wrist pitch on black keys & from velocity ----
         # Base pitch: PITCH (default -5°), add PITCH_BLACK (+3°) when any black key pressed
         pitch_base = self.PITCH
@@ -1607,7 +1656,11 @@ class HandRig:
         self.root[1] += (ry_t - self.root[1]) * alpha
         vx = (float(self.root[0]) - prev_x) / dt
         self._vx = 0.7 * self._vx + 0.3 * vx
-        self.root[2] = self.ROOT_Z + min(0.35, 0.010 * abs(self._vx))
+        self.root[2] = (self.ROOT_Z + min(0.35, 0.010 * abs(self._vx))
+                        + _HS.BOUNCE_LIFT * self._bounce
+                        + _HS.LOUD_LIFT * float(np.mean(
+                            [min(max(float(press.get(f, 0.0)), 0.0), 1.0)
+                             for f in FINGERS]) if FINGERS else 0.0))
 
         yaw_vel = max(-self.YAW_MAX,
                         min(self.YAW_MAX, -self.YAW_GAIN * self._vx))

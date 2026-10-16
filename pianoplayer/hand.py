@@ -25,12 +25,23 @@ HELD_EPS = 1e-3             # B2: overlap slack in quarter notes.
 SEC_SMOOTH = 0.1            # F1: smoothing term added to dt, in seconds.
 REPEAT_PENALTY = 6.0        # F2: same finger + same key + dt < REPEAT_MAX_DT
 REPEAT_MAX_DT = 0.25        #   adds REPEAT_PENALTY*(MAX_DT-dt)/MAX_DT (s).
-SAME_FINGER_BASE = 4.0      # F3: soft cost of reusing one finger on different
-SAME_FINGER_DX = 0.75       #   keys: BASE + DX*|dx_cm| when dt >= MAX_DT.
+SAME_FINGER_BASE = 6.0      # F3: soft cost of reusing one finger on different
+SAME_FINGER_DX = 0.4        #   keys: BASE + DX*|dx_cm| when dt >= MAX_DT.
+                            #   Figure-lite round (learned direction:
+                            #   same_finger 3.0 -> 6.0, dist 0.4 -> 0.2):
+                            #   reuse costs more, distance matters less.
                             #   Round 2: reuse across a leap pays
                             #   leap-proportionally more (was 0.15; 0.5 left
                             #   a slow Bb3-G3 1-1 reuse in Tim_Em b.4).
 SAME_FINGER_MAX_DT = 0.25   # F3: faster reuse than this (s) is still HARD.
+WEAK_UNARY_4 = 0.24         # Figure-lite (learned finger_4 0.12 -> 0.24):
+WEAK_UNARY_5 = 0.12         #   weak fingers pay a small static cost, so an
+                            #   otherwise-tied fingering takes strong fingers.
+FIGURE_W_SCALE = 0.75       # Figure-lite soft weights (physical limits always
+FIGURE_W_CHROM = 1.5        #   win: each is far below HARD): scale runs,
+FIGURE_W_ARP = 2.0          #   chromatic runs, arpeggios, broken octaves.
+FIGURE_W_OCT = 2.5
+FIGURE_MAX_GAP = 0.6        # s: notes further apart break a figure run.
 FALLBACK_BPM = 120.0        # F1: quarters -> seconds when t_sec is missing
                             # (hand-built INotes that never went through
                             # reader()).
@@ -158,6 +169,155 @@ def _valley_bonus(nprev, n, nnext, finger, side):
     return -min(bonus, VALLEY_BONUS_CAP)
 
 
+def _figure_bias(notes, side):
+    """Figure-lite soft suggestions (idea port from 3D-piano-animator
+    figures.py, reimplemented ~40 lines on INotes; no import, no copy).
+
+    Scans consecutive single notes (chord members break runs; gaps over
+    FIGURE_MAX_GAP break runs) and recognises, by MIDI intervals only:
+      * chromatic runs (|step| == 1, len >= 4): white keys -> 1, black -> 3;
+      * scale runs (|step| in 1..2, one direction, len >= 6): the standard
+        one-octave pattern from the run start (RH up 1 2 3 1 2 3 4 5,
+        RH down mirrored, LH up 5 4 3 2 1 3 2 1);
+      * arpeggios (steps of 3..5 semitones, <= 4 pitch classes, span over
+        an octave, len >= 4): cyclic 1-2-3 (triad) / 1-2-3-4 (seventh),
+        peak note -> 5;
+      * broken octaves (adjacent |step| == 12): low -> thumb side finger
+        (RH 1 / LH 5), high -> 5 (4 on a black key), mirrored for LH.
+
+    Returns a list parallel to `notes`: (suggested finger or 0, weight);
+    disagreement pays the weight (far below HARD, so physical limits
+    always win). Notes without midi, chord members and lone notes get
+    (0, 0.0). When figures overlap, the strongest weight wins.
+    """
+    n = len(notes)
+    out = [(0, 0.0)] * n
+    if n < 2:
+        return out
+
+    def put(i, f, w):
+        if f in (1, 2, 3, 4, 5):
+            old_f, old_w = out[i]
+            if w > old_w:
+                out[i] = (f, w)
+
+    def midi(i):
+        try:
+            m = getattr(notes[i], "midi", None)
+            return int(m) if m is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def single(i):
+        return not getattr(notes[i], "isChord", False) and midi(i) is not None
+
+    def gap_ok(i, j):
+        try:
+            return _dt_sec(notes[i], notes[j]) <= FIGURE_MAX_GAP
+        except Exception:
+            return True
+
+    # runs of consecutive single notes without long gaps
+    runs, cur = [], []
+    for i in range(n):
+        if single(i) and (not cur or (cur[-1] == i - 1 and gap_ok(cur[-1], i))):
+            cur.append(i)
+        else:
+            if len(cur) > 1:
+                runs.append(cur)
+            cur = [i] if single(i) else []
+    if len(cur) > 1:
+        runs.append(cur)
+
+    for run in runs:
+        ms = [midi(i) for i in run]
+        steps = [b - a for a, b in zip(ms, ms[1:])]
+        L = len(run)
+        # broken octaves first (pairwise, may sit inside longer runs)
+        for k, st in enumerate(steps):
+            if abs(st) == 12:
+                lo_first = st > 0  # rising: low note first
+                if side == "right":
+                    flo, fhi = 1, 5
+                else:
+                    flo, fhi = 5, 1
+                hi_m = ms[k + 1] if lo_first else ms[k]
+                try:
+                    black_hi = bool(getattr(
+                        notes[run[k + 1] if lo_first else run[k]],
+                        "isBlack", False))
+                except Exception:
+                    black_hi = False
+                if black_hi:
+                    fhi = 4
+                put(run[k], flo if lo_first else fhi, FIGURE_W_OCT)
+                put(run[k + 1], fhi if lo_first else flo, FIGURE_W_OCT)
+        # chromatic runs
+        i = 0
+        while i < L - 1:
+            if abs(steps[i]) != 1:
+                i += 1
+                continue
+            j = i
+            while j + 1 < L and abs(steps[j]) == 1:
+                j += 1
+            seg = list(range(i, j + 1))
+            if len(seg) >= 4:
+                for k in seg:
+                    try:
+                        black = bool(getattr(notes[run[k]], "isBlack",
+                                             False))
+                    except Exception:
+                        black = False
+                    put(run[k], 3 if black else 1, FIGURE_W_CHROM)
+            i = j + 1 if j > i else i + 1
+        # scale runs (one direction, stepwise, not chromatic)
+        i = 0
+        while i < L - 1:
+            if abs(steps[i]) not in (1, 2):
+                i += 1
+                continue
+            up = steps[i] > 0
+            j = i
+            while j < L - 1 and abs(steps[j]) in (1, 2) \
+                    and (steps[j] > 0) == up:
+                j += 1
+            seg = list(range(i, j + 1))
+            if len(seg) >= 6 and not all(abs(s) == 1 for s in
+                                         steps[i:j + 1] if j > i):
+                if side == "right":
+                    pat = ([1, 2, 3, 1, 2, 3, 4, 5] if up
+                           else [5, 4, 3, 2, 1, 3, 2, 1])
+                else:
+                    pat = ([5, 4, 3, 2, 1, 3, 2, 1] if up
+                           else [1, 2, 3, 1, 2, 3, 4, 5])
+                for t, k in enumerate(seg):
+                    put(run[k], pat[t % len(pat)], FIGURE_W_SCALE)
+            i = j + 1 if j > i else i + 1
+        # arpeggios: thirds/fourths, few pitch classes, wide span
+        i = 0
+        while i < L - 2:
+            if not 3 <= abs(steps[i]) <= 5:
+                i += 1
+                continue
+            j = i
+            while j < L - 1 and 3 <= abs(steps[j]) <= 5:
+                j += 1
+            seg = list(range(i, j + 1))
+            if len(seg) >= 4:
+                sms = [ms[k] for k in seg]
+                pcs = {m % 12 for m in sms}
+                if len(pcs) <= 4 and max(sms) - min(sms) > 12:
+                    cyc = [1, 2, 3] if len(pcs) <= 3 else [1, 2, 3, 4]
+                    rising = sms[-1] > sms[0]
+                    for t, k in enumerate(seg):
+                        peak = (t == len(seg) - 1) if rising else (t == 0)
+                        put(run[k], 5 if peak else cyc[t % len(cyc)],
+                            FIGURE_W_ARP)
+            i = j + 1 if j > i else i + 1
+    return out
+
+
 def _set_fingering(n21, fng, replace=True):
     """Attach a Fingering articulation.
 
@@ -266,12 +426,38 @@ class Hand:
                 if i >= j:
                     continue
                 span_cm = abs(nb.x - na.x)
+                if fa == fb:
+                    # one finger on two neighbour keys: the thumb (7.0)
+                    # and the pinky (8.0) really can; anything else is HARD.
+                    if span_cm <= 2.5 and fa == 1:
+                        cost += _HS.THUMB_DOUBLE
+                    elif span_cm <= 2.5 and fa == 5:
+                        cost += _HS.PINKY_DOUBLE
+                    else:
+                        cost += HARD
+                    continue
                 cost += self._span_cost(fa, fb, span_cm)
             # F6: static black/white preference
             if na.isBlack:
                 cost += _HS.BLACK_COST.get(fa, 0.0)
             else:
                 cost += _HS.WHITE_COST.get(fa, 0.0)
+        # Figure-lite inner room: an octave-or-wider grip on 1-4 with an
+        # inner note down between them wants 1-5 (4 leaves no room).
+        try:
+            midis = [int(m.midi) for m in notes
+                     if getattr(m, "midi", None) is not None]
+            if len(midis) == len(notes) and len(notes) >= 3:
+                thumbs = [m for m, f in zip(midis, fingers) if f == 1]
+                tops = [(m, f) for m, f in zip(midis, fingers)
+                        if f in (4, 5)]
+                if thumbs and tops:
+                    lo, (hi, fh) = min(thumbs), max(tops)
+                    if hi - lo >= 11 and fh == 4 and any(
+                            lo < m < hi for m in midis):
+                        cost += _HS.INNER_ROOM_14
+        except (TypeError, ValueError):
+            pass
         return cost
 
     def _chord_finger_candidates(self, chord_notes, limit=6):
@@ -571,6 +757,11 @@ class Hand:
             cost += _HS.BLACK_COST.get(fb, 0.0)
         else:
             cost += _HS.WHITE_COST.get(fb, 0.0)
+        # Figure-lite weak-finger unary: tied paths take strong fingers.
+        if fb == 4:
+            cost += WEAK_UNARY_4
+        elif fb == 5:
+            cost += WEAK_UNARY_5
         # B2: a finger still holding na when nb starts must not replay a
         # different key at the same time.
         if na.time_real + na.dur_real > nb.time_real + HELD_EPS:
@@ -748,6 +939,9 @@ class Hand:
         # layer included via the dp init).
         cands = [cc if single else self._hint_consistent_candidates(ln, cc)
                  for ln, cc, single in zip(layer_notes, cands, is_single)]
+        # Figure-lite: soft per-note suggestions, priced once per single
+        # note in its node cost (chord members never qualify).
+        fig = _figure_bias(notes, self.LR)
         # Node costs: chord-layer interior objective (Amendment A) =
         # _static_chord_cost + internal consecutive pair_cost between
         # adjacent chord members -- exactly the validated
@@ -763,9 +957,11 @@ class Hand:
                 # bias (needs both neighbours; first/last layer get 0).
                 nprev = layer_notes[j - 1][-1] if j > 0 else None
                 nnext = layer_notes[j + 1][0] if j < L - 1 else None
+                fsugg, fw = fig[layers[j][0]]
                 node.append([(0.0 if h0 == 0 or c[0] == h0 else PIN_COST)
                              + _valley_bonus(nprev, ln[0], nnext, c[0],
                                              self.LR)
+                             + (0.0 if fsugg == 0 or c[0] == fsugg else fw)
                              for c in cc])
             else:
                 fit = ln[:5] if len(ln) > 5 else ln
@@ -904,6 +1100,20 @@ class Hand:
                 for fb in fingers:
                     cost_tables[i][:, fb] += _valley_bonus(
                         nprev, ncur, nnext, fb, self.LR)
+        # Figure-lite: same arrival pricing as the valley bias (each
+        # suggested note priced exactly once; notes[0] via the dp init).
+        fig = _figure_bias(notes, self.LR)
+        for i in range(n - 1):
+            fsugg, fw = fig[i + 1]
+            if fsugg:
+                for fb in fingers:
+                    if fb != fsugg:
+                        cost_tables[i][:, fb] += fw
+        fs0, fw0 = fig[0]
+        if fs0:
+            _fig0 = (fs0, fw0)
+        else:
+            _fig0 = (0, 0.0)
 
         # dp[(fa, fb)]: cheapest cost of a path ending with fa on
         # notes[i-1] and fb on notes[i].
@@ -917,7 +1127,9 @@ class Hand:
             for fb in fingers:
                 dp[(fa, fb)] = (cost_tables[0][fa, fb]
                                 + start_pref.get(fa, 0.0)
-                                + (0.0 if h0 == 0 or fa == h0 else PIN_COST))
+                                + (0.0 if h0 == 0 or fa == h0 else PIN_COST)
+                                + (0.0 if _fig0[0] == 0 or fa == _fig0[0]
+                                   else _fig0[1]))
 
         back = {1: {k: k[0] for k in dp}}
         for i in range(2, n):

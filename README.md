@@ -136,12 +136,18 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   one smooth-unioned mesh per hand (elliptical finger sections, pad tips,
   webbing, SDF rest pose, linear-blend skinning from the same IK chains),
   with per-size/side procedural skin texture (tone noise, joint creases,
-  nails, fingertip blush) and a press blush baked into vertex colours
+  nails, fingertip blush; 512 px default, 1024 via `PIANOPLAYER_TEXSIZE=1024`,
+  versioned cache name so look upgrades rebuild once) and a press blush baked into vertex colours
   (multiplied with the texture). Tubes remain as automatic fallback.
   The rest mesh is cached under a geometry-hash name (first build
   ~4.7-7.2 s at size M, ~8-13 s at L/XL/XXL on this machine; the full
   mesh + skinning-weight set is cached, so a warm start loads in ~40 ms
-  instead of rebuilding); skinning runs in ~2.7 ms/frame per hand;
+  instead of rebuilding); skinning runs in ~2.7 ms/frame per hand.
+  Skin material is ambient 0.45 / diffuse 0.65 / specular 0.15 (shininess 24)
+  with a softened blob shadow; idle fingers wander/breathe, dip with
+  pressing neighbours, ride higher over black-key areas, and the wrist
+  bounces on quick re-strikes plus a small loudness lift (all visual-only,
+  IK fingertip targets stay exact);
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent; repeated same-pitch
   notes get a visual release `v_off` earlier than the audio `t_off`, so the
@@ -200,7 +206,16 @@ groups use a layered chord DP (Amendment A node cost) for whole-chord
 consistency (`legacy_chord_postpass` flag keeps the legacy candidate pass).
 Broken-chord valleys/peaks reward the outer finger (leap-scaled, capped;
 arrival drops >= 5 semitones also qualify); slow same-finger reuse on different
-keys costs base + distance rate. `PATTERN_343_PENALTY` stays OFF.
+keys costs base + distance rate (base 6.0 + 0.4/cm). `PATTERN_343_PENALTY` stays OFF.
+Figure-lite soft suggestions (no new solver: priced once per single note in
+the DP node/arrival costs, far below HARD so physical limits always win):
+chromatic runs (white -> 1, black -> 3), one-direction scale runs >= 6 notes
+(standard pattern from the run start), wide arpeggios (cyclic 1-2-3/1-2-3-4,
+peak -> 5), broken octaves (low -> thumb side, high -> 5, 4 on black).
+Weak-finger unary (4: +0.24, 5: +0.12) breaks ties toward strong fingers;
+thumb-black static cost lowered to 0.25 (pinky 0.35); one finger may cover two
+neighbour keys in a chord (thumb 7.0 / pinky 8.0 soft instead of HARD) and an
+octave-plus grip on 1-4 with an inner note down pays 4.0 (preferring 1-5).
 Phase-2 verdicts: E1 prior validated/OFF, E2 (`V_CAP = 40` + `SEC_SMOOTH = 0.2`
 candidates) unvalidated without PIG, E3/E4 OFF.
 

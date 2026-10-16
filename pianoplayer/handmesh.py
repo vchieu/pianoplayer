@@ -86,25 +86,38 @@ def _load_cache(path):
     return None
 
 
-def texture_path(hf=None, side=None):
-    """Per-(hf, side) texture (R1.5); bare call returns the legacy file."""
+def texture_path(hf=None, side=None, size=None):
+    """Per-(hf, side) texture (R1.5); bare call returns the legacy file.
+
+    `size` selects the resolution variant (512 default, 1024 via
+    PIANOPLAYER_TEXSIZE); each size has its own cache file carrying
+    TEX_VERSION, so look upgrades rebuild once and then load fast."""
     if hf is None or side is None:
         return os.path.join(cache_dir(), TEX_NAME)
     s = "left" if str(side).lower().startswith("l") else "right"
+    sz = int(size or H.TEX_SIZE_DEFAULT)
     return os.path.join(cache_dir(),
-                        "handtex_%s_%.2f_%s.png" % (s, float(hf),
-                                                   H.geom_hash()))
+                        "handtex_%s_%.2f_%s_%s%d.png"
+                        % (s, float(hf), H.geom_hash(), H.TEX_VERSION, sz))
 
 
 def _cache_hash_of(fn):
     """Hash embedded in a cache filename, or None for legacy names.
 
-    Current names end in _<hash8> (see cache_path/texture_path); anything
-    else (pre-R1.4 version-suffixed meshes, the bare handtex_v2.png) is
-    legacy and therefore stale by definition (BUG-4)."""
-    tail = fn.rsplit(".", 1)[0].rsplit("_", 1)[-1]
+    Current mesh names end in _<hash8>; current texture names carry
+    _<hash8>_<TEX_VERSION><size> (see cache_path/texture_path); anything
+    else (pre-R1.4 version-suffixed meshes, the bare handtex_v2.png, and
+    pre-v3 unversioned handtex_<side>_<hf>_<hash>.png) is legacy and
+    therefore stale by definition (BUG-4)."""
+    stem = fn.rsplit(".", 1)[0]
+    tail = stem.rsplit("_", 1)[-1]
     if len(tail) == 8 and all(c in "0123456789abcdef" for c in tail):
         return tail
+    # versioned texture: handtex_<side>_<hf>_<hash8>_v<N><size>
+    parts = stem.rsplit("_", 2)
+    if len(parts) == 3 and len(parts[1]) == 8 and \
+            all(c in "0123456789abcdef" for c in parts[1]):
+        return parts[1]
     return None
 
 
@@ -114,6 +127,9 @@ def clear_cache(prune_only=False):
     Default clears all (unchanged); prune_only=True (`--prune-cache`)
     deletes only stale files -- hashed names whose hash != current
     geom_hash() plus legacy unhashed names -- and keeps current caches.
+    Texture files must also carry the current TEX_VERSION marker
+    (pre-v3 unversioned handtex files are stale look, orphaned by the
+    versioned texture_path).
     """
     n = 0
     try:
@@ -122,8 +138,10 @@ def clear_cache(prune_only=False):
         for fn in os.listdir(d):
             if (fn.startswith("handmesh_") and fn.endswith(".npz")) or \
                     (fn.startswith("handtex_") and fn.endswith(".png")):
-                if prune_only and _cache_hash_of(fn) == cur:
-                    continue  # current geometry: keep
+                if prune_only and _cache_hash_of(fn) == cur and \
+                        (fn.startswith("handmesh_") or
+                         ("_%s" % H.TEX_VERSION) in fn):
+                    continue  # current geometry + look: keep
                 try:
                     os.remove(os.path.join(d, fn))
                     n += 1
@@ -978,15 +996,22 @@ def _value_noise(size, cells, seed):
 
 
 def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
-                       side="right"):
-    """Procedural 512^2 skin PNG: tone noise, joint/palm creases, nails.
+                       side="right", size=None):
+    """Procedural skin PNG: tone noise, joint/palm creases, nails.
 
     Rendered from side-local bones, so creases/nails align on every (hf,
     side) pair (R1.5); the pore speckle seed differs per side so the files
-    are never accidentally shared.
+    are never accidentally shared. `size` is the edge in px (512 default,
+    1024 via PIANOPLAYER_TEXSIZE=1024 env or explicit arg) -- 0 frame cost,
+    ~4x VRAM for the hi-res variant.
     """
     from PIL import Image, ImageDraw
-    S = 512
+    if size is None:
+        try:
+            size = int(os.environ.get("PIANOPLAYER_TEXSIZE", "512"))
+        except ValueError:
+            size = 512
+    S = int(size) if int(size) in (512, 1024) else 512
     base = np.array([0.95, 0.80, 0.70], float)
     n1 = _value_noise(S, 24, 7)
     n2 = _value_noise(S, 96, 13)

@@ -34,7 +34,7 @@ python tune_fingering.py      # tuning tool for fingering weights
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
 python test_hand_anatomy.py   # anatomical proportions on the mesh (6 checks)
 python test_review_fixes.py   # review-fix acceptance: cache persistence, t_sec, texture fallback, thumb lock
-python eval_fingering.py      # fingering quality gates (gold + PIG via load_pig, chords included, note-weighted avg + F1-F3 + aim; C arpeggio R is XFAIL)
+python eval_fingering.py      # fingering quality gates (gold + PIG via load_pig, chords included, note-weighted avg + F1-F3 + aim; gold-extra incl. figure-lite octave/arpeggio rows, informational; C arpeggio R is XFAIL)
 python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend, offscreen
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
 python test_falling.py        # falling-note geometry (numpy only, no window)
@@ -93,8 +93,9 @@ costs (`MAX_SPAN`/`COMFORT_SPAN` tables in `handspec.py`, incl. new thumb rows,
 compared as raw cm vs `limit * hf` so hand size matters, quadratic ramp to
 `HARD` beyond max, F4a). Same finger on different keys is HARD only while the first note is
 still held or the gap is at most 0.25 s; slower reuse pays a soft
-`SAME_FINGER_BASE + SAME_FINGER_DX * |dx|` (F3; base 4.0, dx 0.75/cm, so reuse
-across a leap pays leap-proportionally more). Non-thumb crossings pay a soft
+`SAME_FINGER_BASE + SAME_FINGER_DX * |dx|` (F3; base 6.0, dx 0.4/cm, so reuse
+across a leap pays leap-proportionally more but distance matters less than
+before -- learned direction). Non-thumb crossings pay a soft
 `CROSS_BASE` cost scaling with interval and inverse time (F5); thumb-under
 pays `UNDER[fa]` (after-3 cheapest, halved when departing a black key onto
 white). Thumb-under steps arriving on white ride the hand shift
@@ -123,6 +124,21 @@ Reward on the outer finger (LH valley -> 5, peak -> 1; mirrored RH):
 `VALLEY_BONUS_CAP` (2.0 + 2.0/leap-semitone, cap 15.0). Chord members never
 qualify. `PATTERN_343_PENALTY` stays 0.0/OFF (penalizing the triple alone
 dodges to a (3,2,3) crossing instead of the valley 5).
+
+**Figure-lite soft suggestions** (`_figure_bias`, idea port from
+3D-piano-animator figures.py, reimplemented on INotes): consecutive single
+notes (chord members and > 0.6 s gaps break runs) get MIDI-only pattern
+suggestions -- chromatic runs (white -> 1, black -> 3), one-direction scale
+runs >= 6 notes (standard pattern from the run start), wide arpeggios
+(<= 4 pitch classes, span over an octave: cyclic 1-2-3/1-2-3-4, peak -> 5),
+broken octaves (low -> thumb-side finger, high -> 5, 4 on a black key).
+Priced once per note in the layered-DP node cost (arrival column in the
+legacy path), disagreement pays `FIGURE_W_*` (0.75/1.5/2.0/2.5, far below
+HARD so physical limits always win). Weak-finger unary (4: +0.24, 5: +0.12)
+breaks ties toward strong fingers; thumb-black static cost is 0.25
+(pinky 0.35, learned direction); one finger may cover two neighbour keys in
+a chord (`THUMB_DOUBLE` 7.0 / `PINKY_DOUBLE` 8.0 soft instead of HARD) and an
+octave-plus grip on 1-4 with an inner note down pays `INNER_ROOM_14` (4.0).
 
 **Phase-2 verdicts**: E1 prior validated/OFF, E2 (`V_CAP = 40` +
 `SEC_SMOOTH = 0.2` candidates) unvalidated without PIG, E3/E4 OFF.
@@ -274,7 +290,11 @@ max ~0.4 cm/frame) then relax 75% toward their natural parallel slots
 (`_IDLE_NATURAL_LERP`, idle thumb splays `0.5*hf` outward) and extend forward
 (`_IDLE_FWD`) at per-finger `REST_LIFT` heights with
 a small `0.08*sin(2π*0.35*t)` breathing oscillation (offsets scaled by
-`hf/0.82`); fingers in the `held`/`aim_fingers` sets (see `vkeyboard._pump`)
+`hf/0.82`); idle fingers also wander (`WANDER_AMP` 0.05 cm at 0.23 Hz), dip
+with pressing neighbours (`SYMPATHY_DIP` 0.10 cm), and ride higher over
+black-key areas (`WHITE_RIDE` 0.15 cm); the wrist bounces on quick re-strikes
+(`BOUNCE_LIFT` 0.25 cm, tau 0.18 s) plus a mean-press loudness lift (0.12 cm)
+-- all visual-only, IK targets stay reachable so `tip_err` is unchanged; fingers in the `held`/`aim_fingers` sets (see `vkeyboard._pump`)
 keep exact targets and the root spring chases the pre-lerp fan mean, so
 held fingers never drift. A free (idle-transit) finger whose key-x target
 lands within `_COINCIDE_SEP = 1.4` cm (× `hf/0.82`) of an anchored
@@ -286,8 +306,8 @@ thumb never dangles. Anchored fingers are never moved. Joint rings get darker ve
 (no mesh, no white dots); pressed fingers blush only near the tip
 (`smoothstep(0.6,1.0,snorm)`) with contact AO baked into the pad side;
 each hand carries one opaque blob shadow of the *skinned* mesh flattened
-onto `z'=1.6` (world-projection, hidden in the perspective view). Skin material is ambient 0.40 / diffuse
-0.70 with side-edge darkening, FXAA on (MSAA stays 0). A finger holding a key (`press > 0.5`) whose `tip_err >
+onto `z'=1.6` (world-projection, hidden in the perspective view). Skin material is ambient 0.45 / diffuse
+0.65 / specular 0.15 (shininess 24) with side-edge darkening, FXAA on (MSAA stays 0). A finger holding a key (`press > 0.5`) whose `tip_err >
 0.1 cm` makes the root chase with fast `TAU = 0.03` for that frame, and a
 stretched hold (`tip_err > 0.3`) additionally drags the root target toward
 its own key (proportional pull, ≤0.4) so legato stretches stay attached.
@@ -371,8 +391,9 @@ rigid verts (1.0 weight) get single transform; non-rigid use 4-bone blend via
 `einsum` (no Python loops). Skinning ~2.7 ms/hand (M size, 3002 verts). Tip
 accuracy vs IK `q[3]` ≤0.05 cm in press/rest poses; L/R mirror symmetry holds.
 
-**Procedural skin texture** (`handmesh.build_skin_texture`): 512² PNG written
-to cache dir (`handtex_{side}_{hf:.2f}_{geomhash}.png`), loaded via path; `texture_path` ctor param
+**Procedural skin texture** (`handmesh.build_skin_texture`): 512² default,
+1024² via `PIANOPLAYER_TEXSIZE=1024` (own versioned cache file), PNG written
+to cache dir (`handtex_{side}_{hf:.2f}_{geomhash}_{TEX_VERSION}{size}.png`), loaded via path; `texture_path` ctor param
 overrides with user photo (same planar UV). Base tone `(0.95,0.80,0.70)` ±3%
 two-octave value noise (PIL upscaled). Joint-crease bands (~12% dark + light
 ridge) at each finger's MCP/PIP/DIP v-rows across its u-span. 2–3 palm-crease
