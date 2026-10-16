@@ -222,7 +222,9 @@ orthographic top-down view (`_lock_camera` swaps the interactor style); the
 `v` key flips to a ~55° perspective view and back, `Space` (`toggle_pause`)
 freezes score time by skipping `_on_timer()` while still pumping events +
 re-rendering the frozen frame, shifting `_t0`/`_audio_epoch` forward by the
-paused span on resume (fired flags prevent double-fire). Pausing also damps
+paused span plus a `RESUME_LEAD = 0.9` s pre-roll on resume (the score replays
+the last 0.9 s covering the ~0.4 s ring cushion + 0.87 s pipeline, so re-sent
+notes never reach the synth past due; fired flags prevent double-fire). Pausing also damps
 the synth (`all_notes_off()` then `SynthCore`/`SoundEngine.drop_scheduled()`,
 which forgets every queued note on/off but keeps the kind-2 damping events)
 and rewinds each player's `p.sched` to `p.fire`, so after resume `_pump()`
@@ -230,8 +232,11 @@ re-sends the pending notes with the shifted epoch (no early sound, no silent
 key presses; the already-rendered ring cushion of up to ~0.4 s is left alone
 and still heard). While paused each frame runs `_paused_tick()`, which keeps
 `engine.pump()` feeding the ring, refreshes the HUD (so `PAUSED` is visible
-live), and re-renders; same-key presses faster than `KEY_DEBOUNCE` (0.30 s)
-are ignored so holding Space flips pause only once (`GetRepeatCount()` reads
+live), and re-renders; key auto-repeat is ignored via release tracking
+(`KeyReleaseEvent` drops the key from `_keys_down`, `last` slides on every
+event so a hold never ages out of the `KEY_DEBOUNCE` (0.30 s) window, plus a
+1.2 s safety accepting a still-"down" key whose release was lost)
+(`GetRepeatCount()` reads
 1 even for the first press on some VTK builds, so it cannot be used). HUD shows effective BPM (`tempo*speedfactor`,
 `effective_bpm()`) and `PAUSED`. All clocks are monotonic
 (`perf_counter` for `_t0`, `engine_wall`, pump deadlines -- no `time.time()`
@@ -384,8 +389,8 @@ one-line warning). CLI/GUI flags unchanged.
 ## Conventions
 
 - Version is defined in **two** places that must stay in sync:
-  `setup.py` (`version='2.9.1'`) and `pianoplayer/__init__.py`
-  (`__version__ = "2.9.1"`).
+  `setup.py` (`version='2.9.2'`) and `pianoplayer/__init__.py`
+  (`__version__ = "2.9.2"`).
 - `output.xml` is the default annotated output (MusicXML with fingering
   articulations / lyrics).
 - Beam numbering: right hand = 0, left hand = 1 (`-rbeam` / `-lbeam`).

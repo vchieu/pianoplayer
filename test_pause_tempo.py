@@ -69,11 +69,13 @@ def test_space_toggles_pause():
     check(vk._paused is False, "starts unpaused")
     vk._on_keypress(FakeKey("space"))
     check(vk._paused is True, "space pauses")
+    vk._on_keyrelease(FakeKey("space"))
     # a deliberate second press comes much later than the debounce window
     # (auto-repeat while held arrives ~30 ms apart and is ignored: P4)
     vk._last_key_at["space"] -= 1.0
     vk._on_keypress(FakeKey("space"))
     check(vk._paused is False, "space resumes")
+    vk._on_keyrelease(FakeKey("space"))
     vk._playing = False
 
 
@@ -87,6 +89,26 @@ def test_space_hold_does_not_flicker():
     check(vk._paused is True, "held space flickered pause off")
     vk.toggle_pause()                        # direct resume for cleanup
     check(vk._paused is False, "direct resume works")
+    vk._playing = False
+
+
+def test_space_typematic_hold():
+    """Windows typematic delay (250-500 ms) exceeds KEY_DEBOUNCE, so a held
+    Space would re-toggle every ~0.3 s without release tracking: press, then
+    10 repeats 0.5 s apart (each past the debounce window) must all be
+    ignored while the key is down; after release a fresh press resumes."""
+    vk = make_vk()
+    vk._on_keypress(FakeKey("space"))
+    check(vk._paused is True, "first press pauses")
+    for i in range(10):
+        vk._last_key_at["space"] -= 0.5   # 0.5 s since the last event
+        vk._on_keypress(FakeKey("space"))  # typematic repeat: still held
+        check(vk._paused is True, "held space flickered on repeat %d" % i)
+    vk._on_keyrelease(FakeKey("space"))
+    vk._last_key_at["space"] -= 0.5
+    vk._on_keypress(FakeKey("space"))
+    check(vk._paused is False, "fresh press after release resumes")
+    vk._on_keyrelease(FakeKey("space"))
     vk._playing = False
 
 
@@ -107,8 +129,9 @@ def test_v_still_flips_view():
 
 
 def test_pause_shifts_t0():
-    """Resume shifts _t0 (and _audio_epoch) by the paused span: score time
-    freezes, so `now = t - _t0` continues where it stopped (B2)."""
+    """Resume shifts _t0 (and _audio_epoch) by the paused span + RESUME_LEAD
+    pre-roll: score time jumps back 0.9 s so the re-sent notes are not late."""
+    from pianoplayer.vkeyboard import RESUME_LEAD
     vk = make_vk()
     t0, epoch = vk._t0, vk._audio_epoch
     vk.toggle_pause()
@@ -118,14 +141,15 @@ def test_pause_shifts_t0():
     vk.toggle_pause()
     check(vk._paused is False, "resumed flag")
     d = vk._t0 - t0
-    check(abs(d - 0.3) < 0.10, "_t0 shifted by paused span: %g" % d)
+    check(abs(d - (0.3 + RESUME_LEAD)) < 0.10,
+          "_t0 shifted by paused span + pre-roll: %g" % d)
     check(abs((epoch - vk._audio_epoch) - d) < 1e-9,
           "epoch shifted with _t0")
-    # score time is continuous across the pause
+    # score time jumps back by the pre-roll across the pause
     s_before = at_pause - t0
     s_after = time.perf_counter() - vk._t0
-    check(abs(s_after - s_before) < 0.05,
-          "now continuous across pause: %.3f -> %.3f" % (s_before, s_after))
+    check(abs((s_before - s_after) - RESUME_LEAD) < 0.05,
+          "now jumps back RESUME_LEAD: %.3f -> %.3f" % (s_before, s_after))
     vk._playing = False
 
 
@@ -226,6 +250,53 @@ def test_pause_rewinds_sched_and_resends():
     vk._frame(now, dt)
     resent = eng.sent[n_before:]
     check(len(resent) >= 1, "queued notes were not re-sent after resume")
+    vk._playing = False
+
+
+def test_resume_no_late_notes():
+    """After pause+resume no re-sent note may reach the synth past due: the
+    ring cushion (~0.4 s) keeps sounding while the score is frozen, so the
+    RESUME_LEAD pre-roll must cover it (else `when` is clamped to now and
+    `_late_notes` grows)."""
+    class Eng:
+        underruns = 0
+        output_latency = 0.0
+        now = 0.0
+        def __init__(self): self.sent = []; self.dropped = 0; self.off_all = 0
+        def pump(self, *a, **k): return 0
+        def note_on(self, midi, vel, when=None, pan=0.0): self.sent.append((midi, when))
+        def note_off(self, midi, when=None): pass
+        def all_notes_off(self): self.off_all += 1
+        def drop_scheduled(self): self.dropped += 1
+        def shift_pending(self, d): return 0
+    vk = make_vk()
+    eng = Eng()
+    vk.engine = eng
+    vk._engine_wall = vk._t0 - 2.4
+    p = vk._players["R"]
+    now, dt = -2.4, 1.0 / 60.0
+    while now < 1.0:                  # play into the stream: notes due now
+        vk._frame(now, dt); now += dt
+    check(p.sched > p.fire, "scenario needs queued-but-unfired notes")
+    pause_score_now = now
+    epoch_old = vk._audio_epoch
+    vk._late_notes = 0               # isolate the resume window
+    n_before = len(eng.sent)
+    vk.toggle_pause()
+    # the already-rendered cushion keeps sounding through the pause while
+    # the score stands still: model the synth ~0.4 s ahead of the epoch
+    eng.now = (pause_score_now - epoch_old) + 0.4
+    vk._pause_started -= 0.01        # a tiny real paused span
+    vk.toggle_pause()
+    vk._frame(now, dt)
+    resent = eng.sent[n_before:]
+    check(len(resent) >= 1, "queued notes were not re-sent after resume")
+    for midi, when in resent:
+        check(when >= eng.now - 1e-3,
+              "re-sent note %r %.3f s past due (synth now %.3f)"
+              % (midi, eng.now - when, eng.now))
+    check(vk._late_notes == 0, "late notes after resume: %d"
+          % vk._late_notes)
     vk._playing = False
 
 

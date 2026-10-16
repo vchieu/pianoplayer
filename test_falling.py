@@ -65,6 +65,33 @@ def main():
     check("digit z", np.all(v[:, 2] == 0.7))
     check("digit height", abs((v[:, 1].max() - v[:, 1].min()) - 1.7) < 0.5)
 
+    # F1: stroke evenness -- a horizontal bar must be as thick as a vertical
+    # stem (digit 4's bar vs digit 1's stem), within 5%
+    def quad_spans(v):
+        hs, vs = [], []
+        for k in range(F.MAX_QUADS):
+            q = v[4 * k:4 * k + 4]
+            w = q[:, 0].max() - q[:, 0].min()
+            h = q[:, 1].max() - q[:, 1].min()
+            if w < 1e-9 and h < 1e-9:
+                continue                    # unused quad, collapsed to a point
+            if h > 2 * w:
+                vs.append(w)
+            elif w > 2 * h:
+                hs.append(h)
+        return hs, vs
+    v1 = F.place_digit(F.digit_template(1), 10.0, 6.0, 1.7, 0.7)
+    v4 = F.place_digit(F.digit_template(4), 10.0, 6.0, 1.7, 0.7)
+    _, stem_w = quad_spans(v1)
+    bar_h, _ = quad_spans(v4)
+    ok = bool(stem_w) and bool(bar_h)
+    rel = (abs(sum(stem_w) / len(stem_w) - sum(bar_h) / len(bar_h))
+           / ((sum(stem_w) / len(stem_w) + sum(bar_h) / len(bar_h)) / 2)) if ok else 1.0
+    check("stroke evenness H vs V <5%",
+          ok and rel < 0.05, "stem=%.3f bar=%.3f rel=%.3f"
+          % (sum(stem_w) / len(stem_w) if stem_w else -1,
+             sum(bar_h) / len(bar_h) if bar_h else -1, rel))
+
     print("\n%d failure(s)" % len(FAILS))
     return 1 if FAILS else 0
 

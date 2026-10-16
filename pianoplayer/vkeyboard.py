@@ -84,6 +84,16 @@ PRESS_LEAD = 0.025        # press lead compensating visual travel time [s]
 KEY_DEBOUNCE = 0.30       # s: same-key presses faster than this are ignored
                           # (P4: key auto-repeat while held arrives ~30 ms
                           # apart; deliberate presses are much slower)
+KEY_HELD_RESET = 1.2      # s: a press arriving this long after the previous
+                          # event for a still-"down" key assumes its release
+                          # was lost (headless/quantum focus cases) and is
+                          # accepted as a fresh press
+RESUME_LEAD = 0.9         # s of score time replayed after every resume: the
+                          # already-rendered ring cushion (up to ~0.4 s) plus
+                          # the documented 0.87 s pipeline keep sounding while
+                          # the score is frozen, so without a pre-roll the
+                          # re-sent notes would reach the synth past due and
+                          # be heard late (clamped to "now")
 HUD_PERIOD = 0.25         # s between HUD refreshes
 SUSTAIN_LEGATO = 0.15    # s a note rings longer when the next one overlaps
                          # it (simple sustain pedal, C8)
@@ -413,6 +423,10 @@ class VirtualKeyboard:
             if iren is None:
                 return                      # headless: no keys to press
             iren.AddObserver("KeyPressEvent", self._on_keypress)
+            try:
+                iren.AddObserver("KeyReleaseEvent", self._on_keyrelease)
+            except Exception:
+                pass                      # headless: no releases to track
         except Exception:
             pass
 
@@ -428,16 +442,36 @@ class VirtualKeyboard:
             now_k = 0.0
         # P4: ignore auto-repeat while a key is held down.  VTK's
         # GetRepeatCount() reads 1 even for the first press on some builds,
-        # so it cannot tell a hold from a press -- debounce by time instead
+        # so it cannot tell a hold from a press -- track releases instead
         # (repeats arrive ~30 ms apart, deliberate presses much slower).
+        # `last` slides on EVERY event (even ignored repeats) so a hold
+        # never ages out of the debounce window and flickers; a press for
+        # a still-"down" key older than KEY_HELD_RESET assumes its release
+        # was lost and counts as fresh.
         last = self.__dict__.setdefault("_last_key_at", {})
-        if now_k - last.get(sym, -1e9) < KEY_DEBOUNCE:
-            return
+        down = self.__dict__.setdefault("_keys_down", set())
+        prev = last.get(sym, -1e9)
         last[sym] = now_k
+        if sym in down and now_k - prev < KEY_HELD_RESET:
+            return                        # held key: typematic repeat
+        if now_k - prev < KEY_DEBOUNCE:
+            return
+        down.add(sym)
         if sym in ("v", "V"):
             self.toggle_view()
         elif sym in ("space", "Space"):
             self.toggle_pause()
+
+    def _on_keyrelease(self, obj, _evt=None):
+        """Forget a held key so its next press counts as fresh (P4)."""
+        try:
+            sym = obj.GetKeySym()
+        except Exception:
+            return
+        try:
+            self.__dict__.setdefault("_keys_down", set()).discard(sym)
+        except Exception:
+            pass
 
     def toggle_pause(self):
         """Freeze/resume score time (B2).
@@ -445,10 +479,14 @@ class VirtualKeyboard:
         While paused `_run_frames` still pumps events and re-renders the
         frozen frame but skips `_on_timer`, so `now = t - _t0` stands still.
         On resume `_t0` (and `_audio_epoch`, which is defined through `_t0`)
-        shifts forward by the paused span, so the score continues exactly
-        where it stopped.  Events already carry `fired` flags and the synth
-        keeps rendering what was scheduled (fallback feeder), so ringing
-        voices decay naturally and nothing fires twice -- no engine surgery.
+        shifts forward by the paused span plus a RESUME_LEAD pre-roll, so the
+        score replays the last 0.9 s instead of continuing exactly where it
+        stopped: the already-rendered ring cushion (up to ~0.4 s) keeps
+        sounding through the pause while the score is frozen, and without the
+        pre-roll the re-sent notes would reach the synth past due.  Events
+        already carry `fired` flags and the synth keeps rendering what was
+        scheduled (fallback feeder), so ringing voices decay naturally and
+        nothing fires twice -- no engine surgery.
         """
         import time as _t
         self._paused = not getattr(self, "_paused", False)
@@ -469,11 +507,11 @@ class VirtualKeyboard:
             d = _t.perf_counter() - getattr(self, "_pause_started", 0.0) or 0.0
             if d > 0:
                 try:
-                    self._t0 += d
+                    self._t0 += d + RESUME_LEAD
                 except (AttributeError, TypeError):
                     pass
                 try:
-                    self._audio_epoch -= d
+                    self._audio_epoch -= d + RESUME_LEAD
                 except (AttributeError, TypeError):
                     pass
         self._hud_t = -1e9      # force the HUD to show/hide PAUSED at once

@@ -171,8 +171,9 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   each hand's schedule so the pending notes are re-sent on resume (no early
   sound, no silent key presses); the audio ring keeps being pumped while
   paused, the HUD shows `PAUSED` live, and holding Space does not
-  auto-repeat. On resume score time continues exactly where it stopped
-  (ringing notes decay naturally);
+  auto-repeat (release-tracked debounce). On resume the score replays the
+  last 0.9 s (`RESUME_LEAD` pre-roll covering the ring cushion + pipeline,
+  so no note sounds late) while ringing notes decay naturally;
 - **sound stays glued to the picture**: the synth clock is monotonic, the
   output latency is re-measured every frame, and already-scheduled notes are
   shifted when the latency grows mid-playback. If your machine still shows a

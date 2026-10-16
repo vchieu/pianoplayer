@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='pianoplayer',
-    version='2.9.1', #change also in __init__.py
+    version='2.9.2', #change also in __init__.py
     packages=['pianoplayer'],
     package_data={'pianoplayer': ['data/*.npz', 'data/*.png']},
     scripts=['bin/pianoplayer'],
