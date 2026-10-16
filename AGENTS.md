@@ -27,6 +27,8 @@ python test_fingering_props.py # fingering property checks
 python test_pig_loader.py     # PIG loading via load_pig (chords included)
 python test_fingering_hints.py # INote.hint / PIN_COST hint handling
 python test_fingering_valley.py # broken-chord valley outer-finger + no-reuse (50-nam-ve-sau LH bars)
+python test_fingering_343.py # 3-4-3 weak-pair alternation (50-nam-ve-sau LH bars 31-32)
+python test_pause_tempo.py # Space pause + tempo popup/--tempo (headless-safe)
 python fingering_audit.py     # audit tool for fingering output
 python tune_fingering.py      # tuning tool for fingering weights
 python test_hand_reach.py     # fingertip reach/bend over all sizes/fingers/keys (70 cells)
@@ -113,11 +115,14 @@ re-fingering members, then reports cost delta (F7). It runs in linear time.
 pinned finger; pinned notes pay `PIN_COST` unless the solver uses the hint.
 
 **Valley outer-finger bias** (broken-chord lines): a strict local pitch extremum
-with >= `VALLEY_MIN_DEPTH` (2) semitones each side rewards the outer finger
-(LH valley -> 5, peak -> 1; mirrored RH) by
+qualifies via the small-leap path (>= `VALLEY_MIN_DEPTH` (2) semitones each side)
+or the arrival-leap path (drop into valley / rise into peak >= `VALLEY_DROP_MIN`
+(5) semitones, e.g. a repositioning octave drop with a 1-semitone step out).
+Reward on the outer finger (LH valley -> 5, peak -> 1; mirrored RH):
 `VALLEY_BIAS + VALLEY_LEAP_K * (arrival leap - depth)`, capped at
-`VALLEY_BONUS_CAP` (2.0 + 2.0/leap-semitone, cap 15.0) -- a bigger drop means
-the hand repositions, so the outer finger anchors. Chord members never qualify.
+`VALLEY_BONUS_CAP` (2.0 + 2.0/leap-semitone, cap 15.0). Chord members never
+qualify. `PATTERN_343_PENALTY` stays 0.0/OFF (penalizing the triple alone
+dodges to a (3,2,3) crossing instead of the valley 5).
 
 **Phase-2 verdicts**: E1 prior validated/OFF, E2 (`V_CAP = 40` +
 `SEC_SMOOTH = 0.2` candidates) unvalidated without PIG, E3/E4 OFF.
@@ -211,7 +216,12 @@ Hand span (`size` `XXS`..`XXL`) scales `frest` (rest finger positions) by
 loop (`_run_frames`) instead of `interactor.Start()` -- the blocking message
 wait costs ~30 ms/frame and starves the audio ring. The camera is a locked
 orthographic top-down view (`_lock_camera` swaps the interactor style); the
-`v` key flips to a ~55° perspective view and back. All clocks are monotonic
+`v` key flips to a ~55° perspective view and back, `Space` (`toggle_pause`)
+freezes score time by skipping `_on_timer()` while still pumping events +
+re-rendering the frozen frame, shifting `_t0`/`_audio_epoch` forward by the
+paused span on resume (fired flags prevent double-fire; ringing voices decay
+via the synth fallback feeder). HUD shows effective BPM (`tempo*speedfactor`,
+`effective_bpm()`) and `PAUSED`. All clocks are monotonic
 (`perf_counter` for `_t0`, `engine_wall`, pump deadlines -- no `time.time()`
 anywhere in the `_t0` family).
 
@@ -273,7 +283,11 @@ ties included) and converted to seconds through `tempo_map`
 (`[(offset_quarters, bpm), ...]`, `utils.score_tempo_map()` honors
 `MetronomeMark.getQuarterBPM()` so referents like ♪=120 or ♩.=60 are
 correct, and tempo changes are integrated piecewise). With no map, the
-constant `tempo` is used. While a finger holds a key, that finger stays
+constant `tempo` is used. Playback rate only ever flows through
+`speedfactor` (`set_tempo_bpm`/`effective_bpm()`): the tempo popup
+(`prompt_tempo`, tkinter.simpledialog, score BPM as default, skipped when
+offscreen, `--tempo` given, or `PIANOPLAYER_TEMPO_POPUP=0`) and the CLI
+`--tempo BPM` flag (multiplies `--vedo-speed`) never touch A/V sync math. While a finger holds a key, that finger stays
 exactly on the pressed key's x (`_Ev.wx`) even though the hand aims at
 the next note. Visual presses fire `PRESS_LEAD = 0.025` s early so the
 key/finger travel lands with the heard attack (audio scheduling stays on

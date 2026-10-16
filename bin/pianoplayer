@@ -127,6 +127,10 @@ if len(sys.argv) < 2: # no args are passed, pop up GUI
             if self.Lcb.get() and self.lh is not None:
                 vk.build_LH(self.lh)
             vk.playsounds = 1
+            try:
+                vk.prompt_tempo()  # tempo popup; no-op offscreen/env=0/cancel
+            except Exception:
+                pass
             vk.play()          # blocks until the window is closed
             print('Thanks for playing PianoPlayer!')
 
@@ -159,6 +163,7 @@ else: ##########################################################################
     pr.add_argument("-b", "--below-beam",  help="Show fingering numbers below beam line", action="store_true")
     pr.add_argument("-v", "--with-vedo",   help="Play 3D scene after processing", action="store_true")
     pr.add_argument("--vedo-speed", metavar='', type=float, help="[1] Playback rate: 1 keeps the score's own tempo", default=1.0)
+    pr.add_argument("--tempo", metavar='', type=float, help="[off] Playback tempo in BPM for the 3D player (multiplies --vedo-speed; skips the tempo popup)", default=None)
     pr.add_argument("--av-offset-ms", metavar='', type=float, help="[0] Sound-minus-image latency in ms (overrides PIANOPLAYER_AV_MS): raise when the picture runs ahead of the sound", default=0.0)
     pr.add_argument("-z", "--sound-off",   help="Disable sound", action="store_true")
     pr.add_argument("-l", "--left-only",   help="Fingering for left hand only", action="store_true")
@@ -271,4 +276,13 @@ else: ##########################################################################
             vk.playsounds = False
 
         vk.speedfactor = args.vedo_speed
+        if args.tempo:
+            # C2: non-interactive override -- effective BPM directly, still
+            # through the speedfactor path only (C4).
+            try:
+                vk.speedfactor *= float(args.tempo) / max(float(score_tempo(sf)), 1e-3)
+            except (TypeError, ValueError):
+                pass
+        else:
+            vk.prompt_tempo()  # C1 popup; skips itself offscreen/env=0/cancel
         vk.play()   # renders + plays, blocks until the window is closed

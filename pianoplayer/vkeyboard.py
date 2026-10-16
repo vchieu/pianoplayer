@@ -324,6 +324,8 @@ class VirtualKeyboard:
         self._key_mats = {}
         self._touched = set()
         self._playing = False
+        self._paused = False         # Space toggles it (B1): score time freezes
+        self._pause_started = 0.0    # wall time the current pause began
         self._ended = False
         self._cb_id = None
         self._total = 1.0
@@ -412,13 +414,115 @@ class VirtualKeyboard:
             pass
 
     def _on_keypress(self, obj, _evt=None):
-        """D7: `v` flips the camera; every other key keeps its behaviour."""
+        """D7: `v` flips the camera; Space pauses; other keys keep behaviour."""
         try:
             sym = obj.GetKeySym()
         except Exception:
             return
         if sym in ("v", "V"):
             self.toggle_view()
+        elif sym in ("space", "Space"):
+            self.toggle_pause()
+
+    def toggle_pause(self):
+        """Freeze/resume score time (B2).
+
+        While paused `_run_frames` still pumps events and re-renders the
+        frozen frame but skips `_on_timer`, so `now = t - _t0` stands still.
+        On resume `_t0` (and `_audio_epoch`, which is defined through `_t0`)
+        shifts forward by the paused span, so the score continues exactly
+        where it stopped.  Events already carry `fired` flags and the synth
+        keeps rendering what was scheduled (fallback feeder), so ringing
+        voices decay naturally and nothing fires twice -- no engine surgery.
+        """
+        import time as _t
+        self._paused = not getattr(self, "_paused", False)
+        if self._paused:
+            self._pause_started = _t.perf_counter()
+        else:
+            d = _t.perf_counter() - getattr(self, "_pause_started", 0.0) or 0.0
+            if d > 0:
+                try:
+                    self._t0 += d
+                except (AttributeError, TypeError):
+                    pass
+                try:
+                    self._audio_epoch -= d
+                except (AttributeError, TypeError):
+                    pass
+        self._hud_t = -1e9      # force the HUD to show/hide PAUSED at once
+        return self._paused
+
+    def effective_bpm(self):
+        """Current playback tempo in BPM (score tempo x playback rate, C3)."""
+        try:
+            return float(self.tempo) * float(self.speedfactor)
+        except (TypeError, ValueError):
+            try:
+                return float(self.tempo)
+            except (TypeError, ValueError):
+                return 0.0
+
+    def set_tempo_bpm(self, bpm, original=None):
+        """Set the playback rate so the effective tempo equals `bpm` (C4).
+
+        Only flows through the existing `speedfactor` path, so `_beat_seconds`
+        and all A/V sync math are untouched.  Returns the effective BPM, or
+        None when the request is invalid (rate unchanged).
+        """
+        try:
+            base = float(original) if original is not None else float(self.tempo)
+            want = float(bpm)
+        except (TypeError, ValueError):
+            return None
+        if base <= 0 or want <= 0:
+            return None
+        self.speedfactor = want / base
+        self._hud_t = -1e9
+        return self.effective_bpm()
+
+    def prompt_tempo(self):
+        """Ask the user for the playback tempo at playback start (C1).
+
+        Shows the score's own BPM as the default; OK keeps it, entering a
+        number sets the rate via `set_tempo_bpm`.  Skipped (returns None,
+        rate unchanged) when offscreen/headless, when `PIANOPLAYER_TEMPO_POPUP`
+        is "0", or on any failure/cancel -- never raises.
+        """
+        try:
+            if os.environ.get("PIANOPLAYER_TEMPO_POPUP", "1") == "0":
+                return None                      # C2: non-interactive opt-out
+            if getattr(self, "offscreen", False):
+                return None                      # C2: headless has no dialog
+            original = float(self.tempo)
+        except (TypeError, ValueError):
+            return None
+        try:
+            import tkinter as _tk
+            from tkinter import simpledialog as _sd
+            root = getattr(_tk, "_default_root", None)
+            own = False
+            if root is None:
+                root = _tk.Tk()
+                root.withdraw()
+                own = True
+            try:
+                val = _sd.askfloat(
+                    "Playback tempo",
+                    "Tempo in BPM (score: %g):" % original,
+                    initialvalue=round(original, 1),
+                    minvalue=20, maxvalue=400, parent=root)
+            finally:
+                if own:
+                    try:
+                        root.destroy()
+                    except Exception:
+                        pass
+            if val is None:
+                return None                      # cancel = keep original
+            return self.set_tempo_bpm(float(val), original)
+        except Exception:
+            return None                          # any failure = keep original
 
     def toggle_view(self):
         """D7: flip between orthographic top-down and ~55° perspective."""
@@ -868,6 +972,23 @@ class VirtualKeyboard:
                     break
             except Exception:
                 break
+            if getattr(self, "_paused", False):
+                # B2: frozen frame -- keep pumping events (q/Esc/close still
+                # quit) and re-render, but skip _on_timer so score time and
+                # all fired/scheduled state stand still.  The synth's fallback
+                # feeder keeps rendering, so ringing voices decay naturally.
+                try:
+                    vp.render()
+                except Exception:
+                    break
+                frame += 1
+                nxt += period
+                slack = nxt - _time.perf_counter()
+                if slack > 0:
+                    _time.sleep(slack)
+                else:
+                    nxt = _time.perf_counter()
+                continue
             self._on_timer()
             frame += 1
             nxt += period
@@ -925,6 +1046,7 @@ class VirtualKeyboard:
         self._total = tot
         self._prog = -1.0
         self._hud_t = -1e9
+        self._paused = False
         self._ended = False
         self._underrun_seen = 0
         self._late_notes = 0       # note_ons that reached the synth past due
@@ -1244,9 +1366,10 @@ class VirtualKeyboard:
         for p in self._players.values():
             if p.aim < len(p.notes):
                 measure = str(p.notes[p.aim].measure)
-        txt = "  %s / %s      measure %s      %d bpm  (speed x%g)  " % (
+        paused = "  PAUSED" if getattr(self, "_paused", False) else ""
+        txt = "  %s / %s      measure %s      %.0f bpm  (speed x%g)%s  " % (
             _fmt_time(now), _fmt_time(self._total), measure,
-            int(round(self.tempo)), float(self.speedfactor))
+            float(self.effective_bpm()), float(self.speedfactor), paused)
 
         if self._hud is None:
             try:

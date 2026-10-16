@@ -44,6 +44,13 @@ VALLEY_BIAS = 2.0           # Valley outer-finger bias: reward (negative
                             # minimum -> 5, maximum -> 1; mirrored for RH).
                             # 0.0 = off.
 VALLEY_MIN_DEPTH = 2        # semitones each side required for the bias.
+VALLEY_DROP_MIN = 5         # Round A3: arrival-leap gate (semitones). A strict
+                            # extremum whose ARRIVAL leap (drop mp-m into a
+                            # valley, rise m-mp into a peak) reaches this also
+                            # qualifies, regardless of the shallow departure
+                            # side -- a big repositioning leap means the hand
+                            # jumps, so the outer finger anchors. Probed 5..8,
+                            # smallest clearing value (Alberti 3rds stay out).
 VALLEY_LEAP_K = 2.0         # Round 2: extra reward per semitone of arrival
                             # leap (drop into a valley / rise into a peak)
                             # beyond VALLEY_MIN_DEPTH -- a bigger leap means
@@ -95,7 +102,11 @@ def _valley_bonus(nprev, n, nnext, finger, side):
     minimum gets a reward on the outer finger (LH 5 / RH 1); a strict
     local maximum gets it on the other outer finger (LH 1 / RH 5).
     Depth = min(|midi - neighbour|) each side must reach VALLEY_MIN_DEPTH
-    semitones, else 0.0. Round 2: the reward grows with the arrival leap
+    semitones, else 0.0 -- unless the ARRIVAL leap alone reaches
+    VALLEY_DROP_MIN (Round A3: drop mp-m into a valley, rise m-mp into a
+    peak -- a big repositioning leap forces the hand to jump, so the outer
+    finger anchors even when the departure side is a shallow step).
+    Round 2: the reward grows with the arrival leap
     (drop into a valley, rise into a peak -- same constants, symmetric):
     VALLEY_BIAS + VALLEY_LEAP_K * (leap - VALLEY_MIN_DEPTH), capped at
     VALLEY_BONUS_CAP magnitude. Chord members never qualify (simultaneous
@@ -124,19 +135,23 @@ def _valley_bonus(nprev, n, nnext, finger, side):
     except (TypeError, ValueError):
         return 0.0
     if m < mp and m < mn:
-        if min(mp - m, mn - m) < VALLEY_MIN_DEPTH:
+        arrival = mp - m  # drop into the valley from the previous note
+        if min(arrival, mn - m) < VALLEY_MIN_DEPTH \
+                and arrival < VALLEY_DROP_MIN:
             return 0.0
         outer = 5 if side == "left" else 1
         if finger != outer:
             return 0.0
-        leap = mp - m  # drop into the valley from the previous note
+        leap = arrival
     elif m > mp and m > mn:
-        if min(m - mp, m - mn) < VALLEY_MIN_DEPTH:
+        arrival = m - mp  # rise into the peak from the previous note
+        if min(arrival, m - mn) < VALLEY_MIN_DEPTH \
+                and arrival < VALLEY_DROP_MIN:
             return 0.0
         outer = 1 if side == "left" else 5
         if finger != outer:
             return 0.0
-        leap = m - mp  # rise into the peak from the previous note
+        leap = arrival
     else:
         return 0.0
     bonus = VALLEY_BIAS + VALLEY_LEAP_K * max(0, leap - VALLEY_MIN_DEPTH)

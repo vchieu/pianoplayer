@@ -76,6 +76,7 @@ pianoplayer [-h] [-o] [-n] [-s] [-d] [-k] [-rbeam] [-lbeam] [-q] [-m] [-v] [--ve
 #   -b, --below-beam      Show fingering numbers below beam line
 #   -v, --with-vedo       Play the 3D scene with sound after processing
 #   --vedo-speed          [1.0] Playback speed factor (animation and sound)
+#   --tempo               [off] Playback tempo in BPM (multiplies --vedo-speed; skips the tempo popup)
 #   --av-offset-ms        [0] Sound-minus-image latency in ms (overrides PIANOPLAYER_AV_MS)
 #   -z, --sound-off       Disable sound
 #   -l, --left-only       Fingering for left hand only
@@ -159,9 +160,15 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   its exact onset time, tempo marks with any referent (eighth = 120,
   dotted quarter = 60, ...) are interpreted correctly and tempo changes
   inside the score are honored; `--vedo-speed` scales both animation
-  and sound;
-- **HUD** (top left) shows elapsed/total time, current measure and tempo,
-  plus a progress strip along the fall line;
+  and sound. At playback start a popup offers the score's BPM as the
+  default (OK keeps it, typing a number rescales via `speedfactor`);
+  `--tempo BPM` sets it non-interactively (skips the popup) and
+  `PIANOPLAYER_TEMPO_POPUP=0` disables the popup;
+- **HUD** (top left) shows elapsed/total time, current measure and the
+  effective tempo in BPM, plus a progress strip along the fall line;
+- **Space pauses** the player: the frame freezes while `q`/Esc still quit;
+  on resume score time continues exactly where it stopped (ringing notes
+  decay naturally);
 - **sound stays glued to the picture**: the synth clock is monotonic, the
   output latency is re-measured every frame, and already-scheduled notes are
   shifted when the latency grows mid-playback. If your machine still shows a
@@ -185,8 +192,9 @@ raw cm vs `limit * hf`, so hand size matters. Notes carry `INote.midi` plus an
 optional `INote.hint` (pinned finger, `PIN_COST` unless honoured). Chord
 groups use a layered chord DP (Amendment A node cost) for whole-chord
 consistency (`legacy_chord_postpass` flag keeps the legacy candidate pass).
-Broken-chord valleys/peaks reward the outer finger (leap-scaled, capped);
-slow same-finger reuse on different keys costs base + distance rate.
+Broken-chord valleys/peaks reward the outer finger (leap-scaled, capped;
+arrival drops >= 5 semitones also qualify); slow same-finger reuse on different
+keys costs base + distance rate. `PATTERN_343_PENALTY` stays OFF.
 Phase-2 verdicts: E1 prior validated/OFF, E2 (`V_CAP = 40` + `SEC_SMOOTH = 0.2`
 candidates) unvalidated without PIG, E3/E4 OFF.
 
