@@ -15,6 +15,7 @@ Local hand frame (before mirroring for the left hand)::
 from __future__ import annotations
 
 import hashlib
+import math
 
 FINGERS = (1, 2, 3, 4, 5)
 FINGER_NAMES = {1: "thumb", 2: "index", 3: "middle", 4: "ring", 5: "little"}
@@ -281,6 +282,117 @@ HANDMESH_VERSION = "v5"  # v5: distal taper (FING_R_TAPER on DIP/tip) opens
 
 
 # --------------------------------------------------------------------------- #
+# Anatomy (step 3): the 19-bone hand under anatomical names (idea-port of
+# pygame-piano-animator `pianist.py` DEFAULT_ANATOMY + its `wrist` slider).
+#
+# The 3D rig already HAS those 19 bones, only grouped differently (18 skinned
+# bones in handmesh.rest_bones):
+#
+#   forearm     the radius -- not a hand bone, no source counterpart
+#   palm        the five metacarpals mc1..mc5 merged into one bone
+#   f1_cmc      the thumb's own thenar -> MCP span (mc1 gets its own bone)
+#   f{2..5}_0   pp  proximal phalanx (MCP -> PIP)
+#   f{2..5}_1   mp  middle phalanx   (PIP -> DIP)
+#   f{2..5}_2   dp  distal phalanx   (DIP -> tip)
+#   f1_0/1/2    pp1 / dp1 / the thumb pad past the IP joint
+#
+# => 2 rigid + 1 thumb CMC + 15 phalanx bones carry the source's 5 metacarpals
+# + 14 phalanges (the thumb has no middle phalanx).
+#
+# NOTHING here adds a bone or a new geometry constant: every number below is
+# DERIVED from what is already above -- FINGER_SPECS lens/radii/base,
+# ARM_PROFILE, THUMB_CMC_*, thumb_base_y() -- i.e. from exactly the values
+# geom_hash() already covers, so retuning the anatomy rebuilds the mesh cache
+# and the defaults are the shipped rig's own numbers (bit-identical; see
+# Deviations D11).  What this step adds is the NAMED VIEW: the source's 19
+# numbers can be read, compared against a real hand and retuned without
+# touching the solver.
+# --------------------------------------------------------------------------- #
+BONE_KIND = {"mc": "metacarpal", "pp": "proximal phalanx",
+             "mp": "middle phalanx", "dp": "distal phalanx"}
+# the source's 19 bones in its own order: id -> (finger, kind)
+ANATOMY_BONES = (
+    ("mc1", 1, "mc"), ("pp1", 1, "pp"), ("dp1", 1, "dp"),
+    ("mc2", 2, "mc"), ("pp2", 2, "pp"), ("mp2", 2, "mp"), ("dp2", 2, "dp"),
+    ("mc3", 3, "mc"), ("pp3", 3, "pp"), ("mp3", 3, "mp"), ("dp3", 3, "dp"),
+    ("mc4", 4, "mc"), ("pp4", 4, "pp"), ("mp4", 4, "mp"), ("dp4", 4, "dp"),
+    ("mc5", 5, "mc"), ("pp5", 5, "pp"), ("mp5", 5, "mp"), ("dp5", 5, "dp"),
+)
+# the source's own default hand, in its model units (1 unit ~= 1.09 cm there):
+# reference only, for comparing bone_lengths() against.  Each bone there may
+# be 0.70..2.50 x its default (metacarpals included); the wrist width 0.75..
+# 2.00 is a separate slider.  This rig has no per-pianist store (one hand,
+# scaled by hf), so the ranges are not knobs: the bone constants themselves
+# are the knobs and they are hashed.
+SOURCE_UNIT_CM = 1.09
+SOURCE_ANATOMY = {
+    "mc1": 4.7, "pp1": 3.3, "dp1": 2.8,
+    "mc2": 6.684, "pp2": 4.0, "mp2": 2.3, "dp2": 1.8,
+    "mc3": 6.626, "pp3": 4.5, "mp3": 2.7, "dp3": 1.9,
+    "mc4": 6.332, "pp4": 4.2, "mp4": 2.6, "dp4": 1.9,
+    "mc5": 5.974, "pp5": 3.3, "mp5": 1.8, "dp5": 1.7,
+}
+
+
+def bone_lengths():
+    """Anatomical bone lengths [cm] at hf=1: this rig's DEFAULT_ANATOMY view.
+
+    Keys are the source's bone ids (ANATOMY_BONES).  A metacarpal is the
+    wrist -> MCP distance (`mcp_base(f).y` against WRIST_Y); the thumb's mc1 is
+    the whole thenar -> MCP span (THUMB_CMC_A -> the thumb MCP at
+    `thumb_base_y(1.0)`), because the 3D rig carries the CMC as its own bone
+    (f1_cmc).  Phalanges are the FINGER_SPECS lens; the thumb's third segment
+    (past the IP joint -- the rounded pad) has no source bone and is not
+    listed.
+
+    NOTE on the metacarpals: they read ~10 cm here against the source's ~7 cm
+    (6.7 units x 1.09) because the rig's WRIST_Y (-1.8) is the *centre of the
+    wrist loft*, ~2.7 cm proximal to the wrist joint the source measures
+    metacarpals from.  The phalanges -- the part the solver actually flexes --
+    line up within a few tenths of a centimetre.
+    """
+    out = {}
+    for bid, f, kind in ANATOMY_BONES:
+        if kind == "mc":
+            if f == 1:
+                bx, _by, bz = FINGER_SPECS[1]["base"]
+                out[bid] = math.dist(THUMB_CMC_A,
+                                     (bx, thumb_base_y(1.0), bz))
+            else:
+                _x, by, _z = mcp_base(f)
+                out[bid] = abs(by - WRIST_Y)
+            continue
+        i = {"pp": 0, "mp": 1, "dp": 2}[kind]
+        out[bid] = float(FINGER_SPECS[f]["lens"][i])
+    return out
+
+
+def segment_ratio(f):
+    """Per-finger phalanx ratios MCP:PIP:DIP (== pp:mp:dp) over the chain
+    length: the source's per-bone proportions, normalised to 1."""
+    lens = FINGER_SPECS[f]["lens"]
+    tot = float(sum(lens))
+    return tuple(float(v) / tot for v in lens)
+
+
+def knuckle_row():
+    """MCP (knuckle) positions at hf=1: {finger: (x, y, z)} -- the heights of
+    the knuckle dome (the middle finger rides 0.35 cm above the little one;
+    REST_LIFT_Z domes the rest pose over it)."""
+    return {f: mcp_base(f) for f in FINGERS}
+
+
+def wrist_width():
+    """Wrist half-width at hf=1 [cm]: the source's `wrist` slider scales this
+    row of ARM_PROFILE (0.75..2.0 there); here it is hashed with the rest of
+    the profile, so a retune rebuilds the mesh."""
+    for (y, _c, a1, _a2, _p) in ARM_PROFILE:
+        if y == WRIST_Y:
+            return a1
+    return float(PALM_TARGET_A1.get(WRIST_Y, 0.0))
+
+
+# --------------------------------------------------------------------------- #
 # F4a: chord span limits (cm at hf=1, right hand).  MAX_SPAN is the hard
 # limit (HARD cost beyond), COMFORT_SPAN is where quadratic cost starts.
 # Symmetric: MAX_SPAN[fa][fb] == MAX_SPAN[fb][fa].
@@ -537,7 +649,7 @@ SHAPE_CAP_X = 2.1      # cm x hf cap on the shaped-rest x displacement
 SHAPE_CAP_Y = 1.2      # ... and y (hands 0.9/0.5 white-key caps in inches)
                        # -- reference only, NOT wired: the y cap needs a
                        # shaped-rest y, which this rig has no slot for (the
-                       # idle _REST_PULL_Y/_IDLE_FWD own the y). Do not
+                       # idle IDLE_PULL_Y/_IDLE_FWD own the y). Do not
                        # fake-wire it (same rule as REST_MCP_DEG).
 SHAPE_RAMP = (0.15, 0.6)  # cm x hf: a busy finger's pull ramps in over this
                        # |displacement| range -- inside a comfortable grip
@@ -563,6 +675,96 @@ BOUNCE_REPEAT_T = 0.45  # s repeated chords closer than this bounce (hands
                        # signal); kept so the port stays traceable
 
 
+# --------------------------------------------------------------------------- #
+# Flexibility / behaviour (step 3): idea-port of pygame-piano-animator
+# `pianist.py` BEHAVIORS (the technique sliders) and its per-bone anatomy
+# ranges.  The 2D model drives a Gauss-Newton wrist fit that takes per-bone
+# lengths as input; the 3D rig solves a fixed 18-bone skeleton, so what a
+# slider can still move here is (a) how far each finger may fold and how its
+# DIP follows its PIP, and (b) how high a finger waits above the keys, plus
+# the idle curl.
+#
+# Every default is the value the rig ALREADY used (HandRig.BEND_MAX 1.75,
+# HandRig.COUPLING = REST_DIP_RATIO, HandRig.HOVER 0.55 and hand3d's idle
+# lift/pull tables), so the shipped hand stays bit-identical: these are wired,
+# not aspirational.
+#
+# All visual-only and deliberately EXCLUDED from geom_hash(): how flexibly a
+# finger folds is not a shape, and a slider drag must not re-mesh the hand.
+# The geometry half of the source's anatomy -- the bone lengths themselves --
+# lives in the anatomy block above, inside the hash.
+# --------------------------------------------------------------------------- #
+FLEX_BEND = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}     # x HandRig.BEND_MAX
+                        # (the PIP flexion limit solve_chain bisects up to;
+                        # below 1 the chain stops short of a full fold, which
+                        # is what a stiff 4th/5th reads like)
+FLEX_COUPLING = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}  # x HandRig.COUPLING
+                        # (DIP = coupling * PIP; the thumb's 2-joint chain
+                        # follows the same rule).  The cached REST mesh keeps
+                        # using REST_DIP_RATIO directly (handmesh.rest_chains):
+                        # a rest curl is geometry, so it must not move with a
+                        # visual slider -- retune REST_DIP_RATIO for that.
+HOVER_GAP = 0.55        # cm above the key top a waiting fingertip rides
+                        # (hand3d HandRig.HOVER; a WORLD cm like KEY_SINK, not
+                        # scaled with hand size)
+HOVER_ADD = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}  # cm x hf per finger on
+                        # top of HOVER_GAP (PREP_ADD is the raised
+                        # striking-ready counterpart, step 1a); 0 everywhere =
+                        # the shipped look, so a re-tuned value only changes
+                        # how high that finger waits
+IDLE_LIFT = {1: 0.4, 2: 0.9, 3: 1.1, 4: 1.0, 5: 0.8}  # cm x hf: the height
+                        # an idle finger curls at (hand3d reads it live in update(); NOT to
+                        # be confused with REST_LIFT_Z above -- that is the
+                        # rest-pose target lift of the mesh, a different thing)
+IDLE_PULL_Y = {1: 1.0, 2: 0.35, 3: 0.35, 4: 0.35, 5: 0.5}  # cm x hf: how
+                        # far an idle tip retreats toward the wrist (the thumb
+                        # needs the full pull -- its MCP sits far behind the
+                        # fingers -- the others only a hint)
+IDLE_PULL_Z = 0.6       # ... and rises with it, so the finger arches instead
+                        # of splaying (read live by hand3d.update)
+
+# Where the source's sliders landed (the number in brackets is the source's
+# own default; "not ported" entries are deliberate, with the reason).
+BEHAVIOR_PORT = {
+    "retraction": "IDLE_PULL_Y / IDLE_PULL_Z (0.1): an idle tip pulls back and "
+                  "up toward the palm; the thumb only half as much "
+                  "(hands.py 2045).",
+    "finger_curve": "IDLE_LIFT + FLEX_BEND (0.4): the idle curl height, and "
+                    "how far the chain may fold to reach a key.",
+    "antic_hand": "YAW_SPLAY_GAIN / TAU (0.5): the whole hand moves for the "
+                  "notes coming up -- step 1b.",
+    "antic_fingers": "PREP_LEAD_T / STRIKE_T (0.5): the per-finger head start "
+                     "and the final drop -- step 1a.",
+    "tendon_link": "TENDON_LINK / TENDON_FOLLOWERS (0.6) -- step 1c.",
+    "cross_height": "SPLAY_LIMIT_DEG[1] + _COINCIDE_LIFT (0.33): not ported "
+                    "separately -- the IK pole already keeps a crossing finger "
+                    "arched over the thumb exactly.",
+    "lift_height": "PREP_ADD / HOVER_ADD (0.5): how high a finger rises before "
+                   "it strikes.",
+    "wrist_bounce": "BOUNCE_LIFT / BOUNCE_TAU (0.5) -- step 1c.",
+    "tremolo_rotation": "TREM_ROLL_MAX (0.5) -- step 1c.",
+    "gesture_finger_action": "not ported (0.25): splitting a gesture between "
+                             "wrist and fingers needs a chord-size signal the "
+                             "rig does not get.",
+    "cross_turn": "CROSS_TURN_DEG (14 deg) -- folded into the yaw clamp, "
+                  "step 1b.",
+    "smoothness": "HandRig.TAU (0.07 -> 0.065 s): the root spring tau.",
+    "early_release": "LINGER_T (0.22 -> 0.06 s): visual only -- the audible "
+                     "early release belongs to the audio scheduler, not the "
+                     "rig.",
+    "max_speed": "not ported (3.0 m/s): a fingertip speed cap would need the "
+                 "audio scheduler's release times to decide when to let go.",
+    "key_area_near/far": "not ported (0.0/1.0): keys are struck at their own "
+                         "contact y (utils.CONTACT_Y_*).",
+    "roll_speed": "not ported (0.035 s): rolling a too-wide chord is a "
+                  "fingering choice, not a hand pose.",
+    "wrist": "wrist_width() / ARM_PROFILE (1.0): the wrist half-width, hashed "
+             "with the palm profile.",
+    "mc*/pp*/mp*/dp*": "bone_lengths() / segment_ratio() / knuckle_row() over "
+                       "FINGER_SPECS -- hashed geometry.",
+}
+
+
 def geom_hash():
     """8-char sha1 over geometry + SDF constants + grid + version (R1.4).
 
@@ -572,8 +774,14 @@ def geom_hash():
     (TEX_*, SKIN_*, STYLE_*, BOUNCE_*, WANDER_*, SYMPATHY_DIP, WHITE_RIDE,
     LOUD_LIFT) are deliberately EXCLUDED: retuning them must not invalidate
     the mesh cache -- a hand *style* is painted, never re-meshed, so the
-    skin-style marker lives in the texture filename instead. Geometry LOGIC
-    changes (e.g. a rest_chains formula or coupling edit) are invisible to
+    skin-style marker lives in the texture filename instead. The same holds
+    for the step-3 anatomy view (bone_lengths() / segment_ratio() /
+    knuckle_row() / wrist_width() -- pure DERIVATIONS of the hashed constants,
+    which is why this step needed no new hash input) and for the step-3
+    flexibility knobs (FLEX_BEND / FLEX_COUPLING / HOVER_GAP / HOVER_ADD /
+    IDLE_LIFT / IDLE_PULL_Y / IDLE_PULL_Z): how a finger folds is not a shape.
+    Geometry LOGIC changes (e.g. a rest_chains formula or coupling edit) are
+    invisible to
     it -- bump HANDMESH_VERSION manually with every such change (v3 -> v4
     above was exactly this case: the thumb formula reuses unhashed
     THUMB_BASE_Y0 / THUMB_FWD inputs differently, and the coupling change

@@ -174,6 +174,27 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   `--hand-style` (CLI) or `PIANOPLAYER_HAND_STYLE`; each non-default style
   gets its own texture cache file, and `test_hand_render.py` renders one
   offscreen frame per style;
+- **hand anatomy + flexibility, step 3** (ported from the same 2D project's
+  per-bone anatomy table and technique sliders; idea-port -- the 2D model
+  fits a wrist to 19 adjustable bone lengths, the 3D rig solves a fixed
+  18-bone skeleton, so nothing gained a new bone):
+  - the 19 bones are exposed under anatomical names in `handspec.py`
+    (`bone_lengths()` for the source's per-bone view, `segment_ratio()` for
+    each finger's proximal/middle/distal proportions, `knuckle_row()` for the
+    MCP row and its knuckle-dome heights, `wrist_width()` for the wrist
+    slider). They are *derived* from the same geometry constants, so
+    retuning a bone still rebuilds the cached mesh (`geom_hash()`);
+  - how flexibly each finger folds and how high it waits above the keys are
+    now named knobs: `FLEX_BEND` / `FLEX_COUPLING` (per-finger share of the
+    PIP flexion limit and of the DIP-follows-PIP ratio), `HOVER_GAP` /
+    `HOVER_ADD` / `PREP_ADD` (waiting and strike-ready heights) and
+    `IDLE_LIFT` / `IDLE_PULL_Y` / `IDLE_PULL_Z` (the idle curl). Defaults are
+    exactly the values that shipped, so the rig is bit-identical until you
+    change one -- and none of them are inside `geom_hash()`, because how a
+    finger folds is not a shape;
+  - `BEHAVIOR_PORT` in `handspec.py` records where every one of the 2D
+    model's technique sliders landed here (and which few were deliberately not
+    ported, with the reason);
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent; repeated same-pitch
   notes get a visual release `v_off` earlier than the audio `t_off`, so the
@@ -278,6 +299,15 @@ This option only applies to the legacy sliding-window search mode; the default s
   `pianoplayer/handspec.py`. A style only changes how the hand is painted --
   never its geometry, IK or reach -- and it is excluded from the mesh cache
   hash (only the texture filename carries it).
+- The hand's anatomy and flexibility live in `pianoplayer/handspec.py` too:
+  the bone lengths, per-finger segment ratios, knuckle row and wrist width in
+  the "Anatomy" block (geometry -- inside `geom_hash()`, so a change
+  rebuilds the cached mesh), and the per-finger joint limits and
+  hover/idle heights in the "Flexibility / behaviour" block (`FLEX_BEND`,
+  `FLEX_COUPLING`, `HOVER_GAP`, `HOVER_ADD`, `IDLE_LIFT`, `IDLE_PULL_Y`,
+  `IDLE_PULL_Z`; visual-only and excluded from the hash). Defaults are the
+  shipped values; `BEHAVIOR_PORT` documents which 2D-project slider each knob
+  came from.
 
 ## Limitations
 - Awkward crossings (e.g. the 3rd finger over the 4th) are allowed but pay a

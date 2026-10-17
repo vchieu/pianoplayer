@@ -146,7 +146,7 @@ _IDLE_NATURAL_LERP = 0.75
 # cells (XXS-f4, XXL-f5), 0.5 keeps 70/70.
 _THUMB_SPLAY = 0.5
 # H1.4 (D1): idle fingers extend forward by this much (cm x rs, added to the
-# idle yy term) instead of lowering _REST_LIFT/_REST_PULL_Y/_ROOT_Z_BASE
+# idle yy term) instead of lowering IDLE_LIFT/IDLE_PULL_Y/_ROOT_Z_BASE
 # (every literal variant fails 8-24 reach cells). The middle finger is the
 # longest, so it needs the largest push. Idle ratio 0.84-0.90, bend
 # 0.52-0.88, 70/70 green.
@@ -156,9 +156,13 @@ _IDLE_FWD = {1: 1.2, 2: 1.2, 3: 1.7, 4: 1.2, 5: 1.2}
 # geometry of the hand -- single source of truth is pianoplayer/handspec.py
 # (R0.2, imported at top as _HS).  The _NAMES below stay as import aliases
 # so diagnostics and the mesh module keep working unchanged.
+# Step 3 (anatomy): the MCP row comes from the anatomy view
+# (`handspec.knuckle_row()`), i.e. the same `mcp_base()` the rest-mesh builder
+# uses, under its anatomical name.
 # --------------------------------------------------------------------------- #
+_KNUCKLE = _HS.knuckle_row()
 _SPECS = {
-    f: dict(base=_HS.mcp_base(f), lens=tuple(_HS.FINGER_SPECS[f]["lens"]),
+    f: dict(base=_KNUCKLE[f], lens=tuple(_HS.FINGER_SPECS[f]["lens"]),
             radii=tuple(_HS.FINGER_SPECS[f]["radii"]),
             pole=tuple(_HS.FINGER_SPECS[f]["pole"]))
     for f in _HS.FINGERS
@@ -187,13 +191,10 @@ _FING_BELLY = 0.85   # extra z scale on the pad side (sin < 0)
 # 2..4 x1.10 and the pinky x1.08 so neighbours touch (P5 guardrail: <= x1.15).
 _FING_R_SCALE = dict(_HS.FING_R_SCALE)
 _FING_TIP_TAPER = 0.92  # H2: distal segment 8% slimmer than before
-# D5: resting fingers curl instead of hovering flat (robot look).
-_REST_LIFT = {1: 0.4, 2: 0.9, 3: 1.1, 4: 1.0, 5: 0.8}  # hover height per finger
-# resting fingertip retreats toward the wrist (curl): the thumb needs the
-# full pull (its MCP sits far behind the fingers) while the fingers only
-# need a hint -- a uniform 0.8 hooks them in chord poses (measured 1.38 rad).
-_REST_PULL_Y = {1: 1.0, 2: 0.35, 3: 0.35, 4: 0.35, 5: 0.5}
-_REST_PULL_Z = 0.6    # ... and rises, so the finger arches instead of splaying
+# D5: resting fingers curl instead of hovering flat (robot look).  The idle
+# curl is read live from the step-3 anatomy knobs (handspec IDLE_LIFT /
+# IDLE_PULL_Y / IDLE_PULL_Z -- single source) wherever it is used below, so a
+# retune there takes effect without rebuilding anything.
 # rest offsets are world-cm tuned at M (hf=0.82): scale them with hand size,
 # otherwise tiny hands hyper-extend (starfish) and huge hands over-curl.
 _REST_REF_HF = 0.82
@@ -588,19 +589,31 @@ class HandRig:
     skeleton); None reads PIANOPLAYER_HAND_STYLE and falls back to
     `cartoon`, which is exactly the look that shipped.  A style only changes
     colours/texture/material -- never geometry, IK or the update() signals.
+
+    Step 3 (anatomy): the joint limits (`BEND_MAX` / `COUPLING`, per-finger
+    share in handspec FLEX_BEND / FLEX_COUPLING) and the hover/idle heights
+    (handspec HOVER_GAP / HOVER_ADD / IDLE_LIFT / IDLE_PULL_*) are the named
+    knobs ported from the 2D model's per-bone anatomy + technique sliders;
+    their defaults are the values that shipped, so the rig behaves exactly as
+    before.  The bone lengths themselves live in handspec (FINGER_SPECS,
+    ARM_PROFILE) and are inside geom_hash().
     """
 
     ROOT_Y = -13.5            # wrist sits behind the front edge of the keys
     ROOT_Z = 2.3
     BLACK_SHIFT = 1.15         # how far the hand moves into the keyboard
                                # (D1: tuned 1.5 -> 1.15; less over-fold on black)
-    HOVER = 0.55              # fingertip/key gap while a finger waits
+    HOVER = _HS.HOVER_GAP      # fingertip/key gap while a finger waits
     KEY_SINK = 0.10           # fingertip slightly above the pressed key
     TAU = 0.065               # root spring time constant [s]
     YAW_GAIN = 0.006          # rad of yaw per cm/s of hand speed
     YAW_MAX = 0.05
     PITCH = math.radians(-5.0)
     ROLL = math.radians(5.0)  # sign follows the hand side
+    # Step 3 (flexibility): these are the rig-wide joint limits; the per-finger
+    # share of them is handspec.FLEX_BEND / FLEX_COUPLING (all 1.0 = the
+    # shipped hand), applied in update().  Overriding either attr here still
+    # works exactly as before.
     BEND_MAX = 1.75
     COUPLING = _HS.REST_DIP_RATIO  # single source: DIP = 0.65 x PIP like
                        # a real finger (R5.4; wired: update() passes
@@ -1788,8 +1801,11 @@ class HandRig:
                 # hover below applies.
                 yy = y
                 dt_s = lead.get(f)
+                # step 3: HOVER_ADD is this finger's own waiting height
+                # (0 = the shipped uniform HOVER_GAP).
+                hover_z = top + self.HOVER + _HS.HOVER_ADD[f] * rs
                 if dt_s is not None and 0.0 <= dt_s <= _HS.PREP_LEAD_T:
-                    prep_z = top + self.HOVER + _HS.PREP_ADD[f] * rs
+                    prep_z = hover_z + _HS.PREP_ADD[f] * rs
                     if dt_s >= _HS.STRIKE_T:
                         z_aim = prep_z
                     else:
@@ -1798,7 +1814,7 @@ class HandRig:
                     z = z_aim * rest + pressed_z * a
                 else:
                     # D5: the finger about to strike lowers early.
-                    z = (top + self.HOVER) * rest + pressed_z * a
+                    z = hover_z * rest + pressed_z * a
             elif rest > 0.0:
                 # D5: idle fingers curl at their per-finger rest height and
                 # breathe; everything scales with `rest` so a fully pressed
@@ -1807,9 +1823,13 @@ class HandRig:
                 breathe = (_BREATHE_AMP * rs
                            * math.sin(2.0 * math.pi * _BREATHE_FREQ * self._t
                                       + _BREATHE_PHASE[f]) * rest)
-                z = ((top + (_REST_LIFT[f] + _REST_PULL_Z) * rs) * rest
-                     + pressed_z * a + breathe)
-                yy = (y - _REST_PULL_Y[f] * rs * rest
+                z = ((top + (_HS.IDLE_LIFT[f] + _HS.IDLE_PULL_Z) * rs) * rest
+                      + pressed_z * a + breathe)
+                # ... IDLE_PULL_Y: the tip retreats toward the wrist (the
+                # thumb needs the full pull -- its MCP sits far behind the
+                # fingers -- the others only a hint; a uniform 0.8 hooks them
+                # in chord poses, measured 1.38 rad).
+                yy = (y - _HS.IDLE_PULL_Y[f] * rs * rest
                       + _IDLE_FWD[f] * rs * rest)
             else:
                 z = pressed_z
@@ -2055,8 +2075,8 @@ class HandRig:
                 if r2 > 0.0:
                     z = min(z, base[2] + math.sqrt(r2))
             pts, b1 = solve_chain(base, (x, y, z), g["lens"],
-                                  pole, self.BEND_MAX,
-                                  self.COUPLING)
+                                  pole, self.BEND_MAX * _HS.FLEX_BEND[f],
+                                  self.COUPLING * _HS.FLEX_COUPLING[f])
             for i, p in enumerate(pts):
                 q[i] = p
             self.tip_err[f] = float(np.linalg.norm(

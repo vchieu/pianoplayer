@@ -52,8 +52,8 @@ build manifest.
 | `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` (duplicate-chord behaviour unchanged; CLI/GUI import path only) |
 | `pianoplayer/pigloader.py` | PIG dataset loading via `load_pig()` (chords included, note-weighted-average evaluation) |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
-| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`), hand motion step 1 (anticipation / wrist fit / tendon fan), skin styles step 2 (`style=` + vertex-colour bands) |
-| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`), the motion knobs and the skin-style palettes/materials/bands (none hashed); `hand3d` and `handmesh` both import from here |
+| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`), hand motion step 1 (anticipation / wrist fit / tendon fan), skin styles step 2 (`style=` + vertex-colour bands), anatomy/flexibility step 3 (per-finger joint limits + hover/idle knobs) |
+| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`), the 19-bone anatomy view (step 3, derived from those hashed constants), the motion knobs, the skin-style palettes/materials/bands and the per-finger flexibility knobs (none of those hashed); `hand3d` and `handmesh` both import from here |
 | `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture (+ per-style texture variants) |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
@@ -402,6 +402,62 @@ re-meshed, and only the texture filename carries it):
   cache filename for non-default styles only (`handtex_<side>_<hf>_<hash8>_v3
   <style><size>.png`); `_cache_hash_of` still parses the hash, so
   `--prune-cache` keeps current-style files.
+
+**Hand anatomy + flexibility, step 3** (ported from
+`pygame-piano-animator/pianist.py` `DEFAULT_ANATOMY` (19 bones) + its `wrist`
+width slider + the `BEHAVIORS` technique sliders; idea-port, not line-port:
+the 2D model *fits* a wrist to 19 adjustable bone lengths, the 3D rig solves
+a fixed 18-bone skeleton, so **no bone was added** -- the step surfaces the
+proportions and the flexibility as named knobs):
+
+- *Anatomy block of `handspec.py`*, deliberately built from **derivations of
+  the hashed geometry constants** (`FINGER_SPECS` lens/radii/base,
+  `ARM_PROFILE`, `THUMB_CMC_*`, `thumb_base_y()`), never new constants:
+  - `ANATOMY_BONES` / `BONE_KIND` -- the source's 19 bones (5 metacarpals +
+    14 phalanges, the thumb having no middle phalanx) and their names. How
+    they map onto the rig's 18 skinned bones (`handmesh.rest_bones`):
+    `forearm` is the radius (no source bone), `palm` carries all five
+    metacarpals, `f1_cmc` is the thumb's own thenar -> MCP span (mc1 given a
+    bone of its own), `f{2..5}_0/1/2` are pp/mp/dp, `f1_0/1/2` are pp1/dp1
+    plus the thumb pad past the IP joint.
+  - `bone_lengths()` -- this rig's `DEFAULT_ANATOMY` view: a metacarpal is the
+    wrist -> MCP distance, the thumb's mc1 the whole `THUMB_CMC_A` -> thumb-MCP
+    span (the rig carries the CMC as its own bone). They read ~10 cm against
+    the source's ~7 cm because `WRIST_Y` is the centre of the wrist loft,
+    ~2.7 cm proximal to the joint the source measures from; the phalanges (the
+    part the solver flexes) match within a few tenths of a cm.
+  - `segment_ratio(f)` -- per-finger proximal/middle/distal proportions
+    normalised to 1 (`SOURCE_ANATOMY` + `SOURCE_UNIT_CM` 1.09 hold the
+    source's own numbers for comparison).
+  - `knuckle_row()` -- the MCP row `{f: (x, y, z)}`; the z column is the
+    knuckle dome (middle +0.35 cm over little). `hand3d._SPECS` now reads its
+    bases from here (same `mcp_base()` values, anatomical name).
+  - `wrist_width()` -- the wrist half-width row of `ARM_PROFILE` (the source's
+    `wrist` slider scales it; hashed with the rest of the profile).
+  - Everything above is hashed *by construction* (it *is* the hashed geometry),
+    so no new hash input was needed and `geom_hash()` stayed `d055cc04` --
+    which is also why `HANDMESH_VERSION` was **not** bumped. Editing a bone
+    still rebuilds the mesh cache.
+- *Flexibility / behaviour block of `handspec.py`* -- visual-only, **excluded
+  from `geom_hash()`**, defaults = the values the rig already used (probe vs
+  `1561c09`: pose + motion MD5s bit-identical):
+  - `FLEX_BEND` / `FLEX_COUPLING` -- per-finger share (all 1.0) of the rig-wide
+    `HandRig.BEND_MAX` (PIP flexion limit) and `HandRig.COUPLING`
+    (DIP = coupling x PIP), applied where `update()` calls `solve_chain`.
+    Overriding the class attrs still behaves exactly as before.
+  - `HOVER_GAP` (was `HandRig.HOVER` 0.55, a world cm like `KEY_SINK`),
+    `HOVER_ADD` (per-finger extra waiting height, 0 = shipped; the raised
+    striking-ready counterpart is step 1's `PREP_ADD`) -- both feed the hover
+    and the PREP height.
+  - `IDLE_LIFT` / `IDLE_PULL_Y` / `IDLE_PULL_Z` -- the idle curl height and
+    the retreat toward the wrist. `hand3d.update()` reads them **live** (the
+    old module-level `_REST_LIFT` / `_REST_PULL_Y` / `_REST_PULL_Z` copies were
+    dropped: a value snapshotted at import is not a knob). Do not confuse
+    `IDLE_LIFT` with the hashed `REST_LIFT_Z` (the rest-pose target lift of
+    the mesh).
+  - `BEHAVIOR_PORT` -- where each source slider landed (and the few
+    deliberately not ported: `max_speed`, `key_area_*`, `roll_speed`,
+    `gesture_finger_action` need signals the rig does not get).
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
 
