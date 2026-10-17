@@ -2,11 +2,11 @@ from setuptools import setup
 
 setup(
     name='pianoplayer',
-    version='2.9.3', #change also in __init__.py
-    packages=['pianoplayer'],
+    version='2.10.0', #change also in __init__.py
+    packages=['pianoplayer', 'pianoplayer.hands2d'],
     package_data={'pianoplayer': ['data/*.npz', 'data/*.png']},
     scripts=['bin/pianoplayer'],
-    install_requires=['music21', 'vedo', 'numpy', 'miniaudio'],
+    install_requires=['music21', 'vedo', 'numpy', 'miniaudio', 'pygame-ce'],
     python_requires='>=3.9',
     description='Automatic piano fingering generator. Finds and shows in 3D the best fingering combination to play a score.',
     long_description="""Automatic piano fingering generator.

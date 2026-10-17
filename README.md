@@ -118,6 +118,19 @@ then:
 ## The 3D Player:
 Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
 
+- **two hand backends**: by default the hands are drawn with the *verbatim* 2D
+  hand model of [pygame-piano-animator](https://github.com/marcomusy/pygame-piano-animator)
+  (its `hands.py` pose solver and `skins.py` skins are vendored, import lines
+  only, into `pianoplayer/hands2d/`). Every frame both hands are posed at the
+  current score time and drawn on an offscreen pygame surface that is pushed
+  into a `vtkImageData` and shown by a `vtkImageActor` in the *same* renderer,
+  above the 3D keys: the fingertips land on the visible 3D keys (the surface is
+  laid out on the window's own pixel grid, so there is no scaling), the keys,
+  falling notes, HUD, audio and A/V sync are all unchanged, and `v`
+  (perspective) hides the flat overlay. Pick the old procedural rig back with
+  `--hands 3d` (or `PIANOPLAYER_HANDS=3d`); without pygame installed the
+  player warns once and falls back to the 3D hands. `test_hands2d.py`
+  covers the backend end to end (offscreen);
 - **flat top-down view**: the full 88-key keyboard runs along the bottom of the
   window and the whole area above it is left free for the notes to fall into,
   the way Synthesia lays it out;
@@ -236,6 +249,42 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
 - the built-in synthesiser renders a full polyphonic piano with no samples,
   panning each hand slightly to its side of the stage.
 
+## The 2D hands (`pianoplayer/hands2d/`):
+The default `--hands 2d` backend draws the hands of the 2D project
+[pygame-piano-animator](https://github.com/marcomusy/pygame-piano-animator)
+instead of the procedural rig. `hands.py` (pose solver, gestures, crossings),
+`skins.py`, `fingering.py`, `figures.py`, `glissando.py`, `pianist.py` and
+`progress.py` are vendored **verbatim** -- only their import lines were
+rewritten to package-relative form -- next to three small shims
+(`midi_loader.py` without `pretty_midi`, `common.py` with just the key
+geometry, `paths.py` with `DATA_DIR`) and the adapter `render.py`.
+
+Nothing of pianoplayer's is replaced: the music, the fingering solver, the
+audio engine, the 3D keys, the falling notes and the HUD are all unchanged.
+The adapter only
+
+- turns the player's `_Ev` list into the 2D model's `midi_loader.Note`s (with
+  the finger the fingering solver chose), so the 2D **fingering planner is
+  never used**;
+- builds a `common.Keyboard` whose `key_rects[pitch].centerx` is forced onto
+  `_key_x(midi)`, so every fingertip lands on the visible 3D key;
+- draws `hands.draw_hands()` on an offscreen `pygame.Surface` (no display, no
+  `pygame.init()`, no mixer, no files) laid out on the window's own pixel grid
+  (`ppc = window_width_px / (kb_w + 2 * KB_MARGIN_X)`), and uploads the RGBA
+  result into a `vtkImageData` at `z = 2.2` shown by a `vtkImageActor` in the
+  same renderer -- rows are reversed on upload, because pygame counts down and
+  a VTK image counts up.
+
+The surface is cropped to a horizontal **band** covering the world-y range
+`KB_BOTTOM_Y .. BAND_TOP_Y` (14.0 cm, ~44% of the window height on a
+1785x1020 screen): the hands never paint above it, so nothing is clipped and
+the upload only pushes ~4x fewer pixels than a full-window texture.
+
+It is a visual layer: a failure hides the overlay and never stops playback, and
+if pygame (or the VTK image classes) cannot be imported the player prints one
+warning and switches to `--hands 3d`. **pygame-ce** is a hard dependency
+(`setup.py` lists it) because the default backend needs it.
+
 
 ## How the algorithm works:
 The algorithm minimizes the fingers speed needed to play a sequence of notes or chords by searching
@@ -298,7 +347,12 @@ This option only applies to the legacy sliding-window search mode; the default s
   material coefficients and vertex-colour bands live in the "Skins" block of
   `pianoplayer/handspec.py`. A style only changes how the hand is painted --
   never its geometry, IK or reach -- and it is excluded from the mesh cache
-  hash (only the texture filename carries it).
+  hash (only the texture filename carries it). In the default 2D backend the
+  same four names pick the matching skin of the 2D model;
+- the hand render backend: `--hands 2d|3d` (CLI) or `PIANOPLAYER_HANDS`;
+  default `2d` (the vendored pygame-piano-animator hands composited over the
+  3D keys), `3d` for the procedural `HandRig`. The 2D backend is visual only:
+  it never touches the fingering, the audio scheduling or the timing.
 - The hand's anatomy and flexibility live in `pianoplayer/handspec.py` too:
   the bone lengths, per-finger segment ratios, knuckle row and wrist width in
   the "Anatomy" block (geometry -- inside `geom_hash()`, so a change

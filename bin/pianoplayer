@@ -166,6 +166,7 @@ else: ##########################################################################
     pr.add_argument("--tempo", metavar='', type=float, help="[off] Playback tempo in BPM for the 3D player (multiplies --vedo-speed; skips the tempo popup)", default=None)
     pr.add_argument("--av-offset-ms", metavar='', type=float, help="[0] Sound-minus-image latency in ms (overrides PIANOPLAYER_AV_MS): raise when the picture runs ahead of the sound", default=0.0)
     pr.add_argument("--hand-style", metavar='', type=str, help="[cartoon] Hand look for the 3D player: cartoon | gloves | robot | skeleton (overrides PIANOPLAYER_HAND_STYLE)", default=None)
+    pr.add_argument("--hands", metavar='', type=str, help="[2d] Hand render backend: 2d (pygame-piano-animator hands over the 3D keys) | 3d (the procedural rig; env PIANOPLAYER_HANDS)", default=None)
     pr.add_argument("-z", "--sound-off",   help="Disable sound", action="store_true")
     pr.add_argument("-l", "--left-only",   help="Fingering for left hand only", action="store_true")
     pr.add_argument("-r", "--right-only",  help="Fingering for right hand only", action="store_true")
@@ -258,7 +259,8 @@ else: ##########################################################################
             print('Sorry, start_measure must be set to 1 when -v option is used. Exit.')
             exit()
 
-        vk = VirtualKeyboard(songname=xmlfn, tempo=score_tempo(sf))
+        vk = VirtualKeyboard(songname=xmlfn, tempo=score_tempo(sf),
+                             hands=args.hands)
         vk.tempo_map = score_tempo_map(sf)
         if args.hand_style:
             vk.hand_style = args.hand_style

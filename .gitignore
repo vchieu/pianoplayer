@@ -11,6 +11,7 @@ output.xml
 test_audio_out/
 test_hand_render/
 test_play_out/
+test_player2d_out/
 test_shadow_out.png
 hand_look_out/
 PIANOPLAYER_*.md

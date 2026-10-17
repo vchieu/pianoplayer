@@ -48,7 +48,9 @@ def main(fn="scores/test_scales.xml", seconds=7.0, nmeasures=1000):
           len(rh.fingerseq), "| LH notes", len(lh.noteseq),
           "fingers", len(lh.fingerseq))
 
-    vk = VirtualKeyboard(songname=fn, tempo=tempo, offscreen=True)
+    # hands="3d": this test reads the rig (tip_err, root, finger targets); the
+    # 2D backend is covered by test_hands2d.py
+    vk = VirtualKeyboard(songname=fn, tempo=tempo, offscreen=True, hands="3d")
     vk.verbose = False
     vk.volume = 0.0                    # the device must be silent
     vk.speedfactor = 1.0

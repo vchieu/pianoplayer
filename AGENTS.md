@@ -39,6 +39,7 @@ python test_hand_look.py      # Tier A hand-look acceptance: tilt/gap/ratio/bend
 python test_sync.py           # A/V sync incl. mid-playback output-latency jump (FakeEngine)
 python test_falling.py        # falling-note geometry (numpy only, no window)
 python test_repeat_notes.py   # repeated same-pitch notes visibly release key/finger (no window)
+python test_hands2d.py     # 2D hand backend: overlay paints, fingertips on the 3D keys, styles, view toggle
 ```
 
 There is no linter, formatter, CI config, or pyproject; `setup.py` is the only
@@ -60,6 +61,7 @@ build manifest.
 | `pianoplayer/falling.py` | Synthesia-style falling notes: pure numpy bar/digit geometry + VTK `FallingNotes` layer |
 | `pianoplayer/utils.py` | Keyboard geometry, note-name helpers, shared constants |
 | `pianoplayer/wavegenerator.py` | Legacy simpleaudio chord player (deprecated) |
+| `pianoplayer/hands2d/` | **Vendored 2D hand model** (`hands.py` pose solver + `skins.py` skins from pygame-piano-animator, verbatim except import lines), three shims (`midi_loader.py` without pretty_midi, `common.py` key geometry only, `paths.py` DATA_DIR) and the `Hands2D` pygame->VTK overlay adapter (`render.py`) |
 
 ## The fingering algorithm (source of truth)
 
@@ -458,6 +460,62 @@ proportions and the flexibility as named knobs):
   - `BEHAVIOR_PORT` -- where each source slider landed (and the few
     deliberately not ported: `max_speed`, `key_area_*`, `roll_speed`,
     `gesture_finger_action` need signals the rig does not get).
+
+**2D hand render backend** (`pianoplayer/hands2d/`, default `--hands 2d`):
+`hands.py` (pose solver / gestures / crossings), `skins.py`,
+`fingering.py`, `figures.py`, `glissando.py`, `pianist.py` and `progress.py`
+are vendored **verbatim** from `D:\Project\pygame-piano-animator` (only the
+import lines were rewritten to package-relative form; a diff of the 7 files
+shows nothing but import lines), next to three shims -- `midi_loader.py`
+(`Note`/`TrackInfo`/`MidiSong`/`is_black_key`/`note_name`/pedal constants,
+**no `pretty_midi`**), `common.py` (`KEY_LEN_WW`, `_BLACK_OFFSETS`, the
+realistic `Keyboard.layout` only) and `paths.py` (`DATA_DIR`, a string under
+`~/.cache/pianoplayer/hands2d`) -- and the adapter `render.py::Hands2D`.
+
+The adapter is the only new logic: it turns the players' `_Ev` lists into
+2D `Note`s (`pitch/start/end/velocity/hand/finger`, a note without a finger
+gets `3`), passes `fingering={id(n): finger}` so the 2D planner, `figures` and
+`pretty_midi` are never used, and creates one `HandAnimator` per hand with
+`Pianist("Default", DEFAULT_ID, skin=skins.default_skin(style))`. The pixel
+grid is the window's own: `ppc = win_w / (kb_w + 2*KB_MARGIN_X)`,
+`px(x) = (x - x0)*ppc`, `py(y) = (y1 - y)*ppc` with
+`x0/x1 = cx ∓ (kb_w/2 + KB_MARGIN_X)`, `y0 = KB_BOTTOM_Y`, `y1 = cy + pscale`.
+The shim `Keyboard`'s rect is built with `rect_h = (4.0*ppc)/0.37` (the 4 cm
+between the white- and black-key fronts, as in 3D) and `rect.bottom` pinned to
+`py(-8.0)`, the 3D white keys' front; every `key_rects[midi].centerx` is then
+overridden with `px(_key_x(midi))` (the 2D black-key offsets are discarded) and
+`white_w = KEY_WB*ppc`, so a fingertip aimed at a key lands on that key's own
+pixel.
+
+The overlay surface is cropped to a horizontal **band** covering the world-y
+range `KB_BOTTOM_Y .. BAND_TOP_Y` (`BAND_TOP_Y = 14.0 cm`, about 44% of the
+window height on a 1785x1020 screen); the hands never paint above it, so
+nothing above `y = +14 cm` is clipped (`test_hands2d.py` asserts the band's
+top rows stay empty on every frame). Drawing goes to an offscreen
+`pygame.Surface` (SRCALPHA, no display, no `pygame.init()`, no mixer) laid out
+on the window's own pixel grid; the upload reverses the rows (pygame counts
+down, a VTK image counts up) into a reused `(band_h, W, 4)` uint8 array and a
+`vtkImageData` (`spacing 1/ppc`, origin `(x0, y0, 2.2)`, RGBA) shown by a
+`vtkImageActor` added to the same renderer -- it alpha-composites over the 3D
+keys and is hidden in the perspective (`v`) view.
+
+`vkeyboard.VirtualKeyboard(hands=...)` (env `PIANOPLAYER_HANDS`, flag
+`--hands`) picks the backend; anything but `2d` is `3d`. In `2d` mode
+`build_RH`/`build_LH` skip the `HandRig` (`self.RH`/`self.LH` stay `None`),
+`_prepare` still builds a rig-less `_Player` per side (keys and audio are
+unchanged) and builds + warms the overlay *before* `_t0`, and `_frame` replaces
+`p.rig.update(...)` with `Hands2D.update(now, dt)`. Any failure hides the
+overlay and never stops playback; no pygame/VTK image means one warning and a
+fallback to `3d` (with the rigs built then). Tests that read rig internals
+(`test_play.py`, `test_regression.py`) are pinned to `hands="3d"`;
+`test_hands2d.py` covers the 2D backend.
+
+**Performance**: on a 1785x1020 window, `prepare_hands`+pose ~10-30 ms,
+`draw_hands` ~14 ms, overlay upload ~16 ms, but VTK `render()` of the whole
+scene (keys + HUD + falling bars) is ~80-150 ms, so the default 2D backend
+runs ~5-10 fps vs ~63 fps for the 3D rig. The band crop saves texture/upload
+cost (~4x fewer pixels than full window); `--hands 3d` / `PIANOPLAYER_HANDS=3d`
+is the escape hatch for smooth playback.
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
 

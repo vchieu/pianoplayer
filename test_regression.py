@@ -47,7 +47,10 @@ def make_hand(sf, side="right", start=1, nmeas=1000):
 
 
 def make_vk(hands, tempo_bpm=120.0):
-    vk = VirtualKeyboard(songname="regress", tempo=tempo_bpm, offscreen=True)
+    # hands="3d": this test reads the rig's finger targets (the 2D backend is
+    # covered by test_hands2d.py)
+    vk = VirtualKeyboard(songname="regress", tempo=tempo_bpm, offscreen=True,
+                         hands="3d")
     vk.verbose = False
     vk.playsounds = False
     for h, side in hands:

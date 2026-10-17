@@ -288,13 +288,23 @@ def _aim_fingers(notes, now, lead=AIM_LEAD, start=0):
 class VirtualKeyboard:
     """3D keyboard with animated hands and synthesised piano sound."""
 
-    def __init__(self, songname='', tempo=72.0, offscreen=False, shadows=False):
+    def __init__(self, songname='', tempo=72.0, offscreen=False, shadows=False,
+                 hands=None):
         self.KB = {}                # note name -> key mesh
         self.offscreen = bool(offscreen)
         # experimental: vtkShadowMapPass (hands cast shadows on the keys).
         # The shadow frustum is fitted to the scene, on wide screens some
         # surfaces fall outside it and turn black, so it is off by default.
         self.shadows = bool(shadows)
+        # hand render backend: "2d" (the vendored pygame-piano-animator
+        # hands, drawn offscreen over the 3D keys) or "3d" (the procedural
+        # HandRig).  PIANOPLAYER_HANDS sets it, --hands overrides it (see
+        # bin/pianoplayer); anything but "2d" means "3d".
+        self.hands = (hands or os.environ.get("PIANOPLAYER_HANDS") or
+                      "2d").strip().lower()
+        if self.hands != "2d":
+            self.hands = "3d"
+        self._hands2d = None        # pianoplayer.hands2d.Hands2D overlay
         self.falling = os.environ.get("PIANOPLAYER_FALLING", "1") != "0"
         self._fall = None
         # hand look (step 2): PIANOPLAYER_HAND_STYLE picks the skin style
@@ -617,6 +627,14 @@ class VirtualKeyboard:
                     rig.set_texture_enabled(not self._view_persp)
         except Exception:
             pass
+        # the 2D overlay is a flat plane over the keys: nothing to show from
+        # a 55 deg camera
+        h2 = getattr(self, "_hands2d", None)
+        if h2 is not None:
+            try:
+                h2.set_visible(not self._view_persp)
+            except Exception:
+                pass
         return self._view_persp
 
     # ------------------------------------------------------------------ scene
@@ -641,6 +659,14 @@ class VirtualKeyboard:
         pscale = (kb_w / 2.0 + KB_MARGIN_X) / aspect
         cy = KB_BOTTOM_Y + pscale         # pin the keys to the bottom edge
         cam_z = 400.0
+        # kept for the 2D hand overlay (see _ensure_hands2d): the pixel grid
+        # the 2D hands are drawn on is the window's own, in world cm
+        self._win_w = w
+        self._win_h = h
+        self._pscale = pscale
+        self._cy = cy
+        self._aspect = aspect
+        self._kb_right = right
 
         # 8x MSAA on a full-width window costs ~12 ms per frame, which is the
         # difference between ~6 fps and ~30 fps -- and a starved frame is
@@ -821,6 +847,10 @@ class VirtualKeyboard:
     def build_RH(self, hand):
         """Attach a `pianoplayer.hand.Hand` (side='right') to the scene."""
         self.rightHand = hand
+        if self.hands == "2d":
+            self.RH = None              # the 2D overlay draws both hands
+            self.vpRH = None
+            return self
         self.RH = HandRig(side="right", size=getattr(hand, "size", "M"),
                           style=getattr(self, "hand_style", None))
         self.RH.add_to(self.vp)
@@ -830,11 +860,85 @@ class VirtualKeyboard:
     def build_LH(self, hand):
         """Attach a `pianoplayer.hand.Hand` (side='left') to the scene."""
         self.leftHand = hand
+        if self.hands == "2d":
+            self.LH = None              # the 2D overlay draws both hands
+            self.vpLH = None
+            return self
         self.LH = HandRig(side="left", size=getattr(hand, "size", "M"),
                           style=getattr(self, "hand_style", None))
         self.LH.add_to(self.vp)
         self.vpLH = self.LH
         return self
+
+    def _ensure_hands2d(self):
+        """Build the 2D hand overlay; None when it cannot be built."""
+        if self._hands2d is not None:
+            return self._hands2d
+        if self.vp is None:
+            return None
+        try:
+            from pianoplayer.hands2d import Hands2D
+        except Exception as exc:        # the vendored package is broken
+            print("2D hands unavailable (%s): using the 3D hands" % exc)
+            return None
+        kb_w = self._span
+        cx = self._cx
+        margin = kb_w / 2.0 + KB_MARGIN_X
+        x0 = cx - margin
+        x1 = cx + margin
+        y0 = KB_BOTTOM_Y
+        y1 = self._cy + self._pscale
+        geom = {
+            "w": self._win_w, "h": self._win_h,       # window, px
+            "ppc": self._win_w / (x1 - x0),             # pixels per world cm
+            "x0": x0, "x1": x1, "y0": y0, "y1": y1,     # visible world box
+            "cx": cx, "kb_w": kb_w, "key_w": KEY_WB,
+            "key_x": _key_x,
+        }
+        try:
+            h2 = Hands2D(self.vp, geom, style=getattr(self, "hand_style", None))
+        except Exception as exc:
+            print("2D hands unavailable (%s): using the 3D hands" % exc)
+            return None
+        if h2.actor is None:           # pygame or the VTK image classes are missing
+            print("2D hands unavailable (pygame / vtkImageActor): using the 3D hands")
+            return None
+        self._hands2d = h2
+        return h2
+
+    def _use_hands2d(self, notes_by_hand):
+        """The 2D overlay with its animators, or None (already switched to 3D)."""
+        h2 = self._ensure_hands2d()
+        if h2 is None:
+            self._fallback_to_3d()
+            return None
+        try:
+            h2.build(notes_by_hand, style=getattr(self, "hand_style", None))
+        except Exception as exc:
+            print("2D hands unavailable (%s): using the 3D hands" % exc)
+            h2.close()
+            self._hands2d = None
+            self._fallback_to_3d()
+            return None
+        return h2
+
+    def _fallback_to_3d(self):
+        """No usable 2D hands: build the 3D rigs now and give them the players."""
+        self.hands = "3d"
+        for side, attr, hand in (("R", "RH", getattr(self, "rightHand", None)),
+                                 ("L", "LH", getattr(self, "leftHand", None))):
+            if hand is None:
+                continue
+            setattr(self, attr, HandRig(
+                side="right" if side == "R" else "left",
+                size=getattr(hand, "size", "M"),
+                style=getattr(self, "hand_style", None)))
+            getattr(self, attr).add_to(self.vp)
+            setattr(self, "vp" + attr, getattr(self, attr))
+        for p in self._players.values():
+            p.rig = getattr(self, p.side + "H", None)
+            if p.rig is not None and p.notes and p.notes[0].fx:
+                p.rig.settle(p.notes[0].fx, {})
 
     # ------------------------------------------------------------------ score
     def _beat_seconds(self, beat):
@@ -1078,15 +1182,22 @@ class VirtualKeyboard:
                 ("L", -1.0, -0.30, "leftHand", "LH")):
             hand = getattr(self, attr, None)
             rig = getattr(self, rigname, None)
-            if hand is None or rig is None:
+            if hand is None:
                 continue
+            # rig is None in 2D mode: the overlay draws the hands, but the
+            # player still fires the keys and hands the notes to the synth.
             p = _Player(side, sign, pan, hand, rig)
             p.notes = self._events_for(hand, sign, pan)
             if not p.notes:
                 continue
             self._players[side] = p
-            if p.notes[0].fx:
+            if rig is not None and p.notes[0].fx:
                 rig.settle(p.notes[0].fx, {})
+
+        # the 2D overlay: built and warmed here, before _t0 starts, so the
+        # first pose does not stall a frame after playback has begun
+        if self.hands == "2d" and self._players:
+            self._use_hands2d({side: p.notes for side, p in self._players.items()})
 
         if getattr(self, "_fall", None) is not None:
             self._fall.reset()
@@ -1404,10 +1515,27 @@ class VirtualKeyboard:
                         newv = tgt
                     p.press[f] = newv
 
-            p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
-                         held={f for f in FINGERS if p.active.get(f)},
-                         aim_fingers=p.aim_fingers,
-                         strike_in=p.strike_in)
+            if p.rig is not None:                  # 3D hands (rig is None in 2D)
+                p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
+                             held={f for f in FINGERS if p.active.get(f)},
+                             aim_fingers=p.aim_fingers,
+                             strike_in=p.strike_in)
+
+        h2 = self._hands2d
+        if h2 is not None:
+            try:
+                h2.update(now, dt)
+            except Exception:
+                if not self._err:
+                    self._err = True
+                    import traceback
+                    traceback.print_exc()
+                try:
+                    h2.set_visible(False)          # no frozen hands left on screen
+                except Exception:
+                    pass
+                self._hands2d = None               # never let a cosmetic layer
+                                                    # kill playback
 
         self._sync_keys(dt)
         fall = getattr(self, "_fall", None)
