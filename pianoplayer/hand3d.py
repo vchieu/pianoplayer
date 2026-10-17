@@ -40,6 +40,7 @@ Local hand frame (before mirroring for the left hand):
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 from vedo import Ellipsoid, Mesh
@@ -76,6 +77,24 @@ SKIN_PRESS = (0.96, 0.72, 0.64)
 # the skin (within ~6%), mixed 0.6 over the base colour.
 _NAIL_PATCH = (0.97, 0.82, 0.74)
 _NAIL_MIX = 0.6
+# Step 2 (skins): the four looks ported from pygame-piano-animator
+# `skins.py`.  `cartoon` (default) is the look that shipped -- its colours
+# are exactly SKIN / SKIN_PRESS / _NAIL_PATCH / _NAIL_MIX / _SHADOW_COL /
+# _SKIN_PRESS_MUL and its material is handspec SKIN_*, so nothing about the
+# default rendering changes; `gloves` / `robot` recolour (texture variant +
+# vertex-colour bands, see STYLE_BANDS), `skeleton` is bones only and falls
+# back to the tubes mesh with a dark colour.  Colours/materials live in
+# handspec (STYLE_COLORS / STYLE_MATERIAL); nothing here is hashed.
+STYLE_ORDER = _HS.STYLE_ORDER
+STYLE_DEFAULT = _HS.STYLE_DEFAULT
+
+
+def style_from_env(explicit=None):
+    """Resolve the hand style: explicit arg, then PIANOPLAYER_HAND_STYLE,
+    then the default (`cartoon`) -- same pattern as PIANOPLAYER_FALLING."""
+    if explicit:
+        return _HS.normalize_style(explicit)
+    return _HS.normalize_style(os.environ.get("PIANOPLAYER_HAND_STYLE", ""))
 
 FINGER_NAMES = {1: "thumb", 2: "index", 3: "middle", 4: "ring", 5: "little"}
 FINGERS = (1, 2, 3, 4, 5)
@@ -396,15 +415,21 @@ def _tube_faces(K, M):
     return faces
 
 
-def _material(mesh, ambient, diffuse, specular):
-    """D6: set the VTK lighting coefficients (kept separate from colours)."""
+def _material(mesh, ambient, diffuse, specular, shininess=None):
+    """D6: set the VTK lighting coefficients (kept separate from colours).
+
+    `shininess` is passed by the style looks (a robot shell wants a hard
+    highlight); None keeps the skin default, so every existing call site is
+    bit-identical.
+    """
     try:
         p = mesh.actor.GetProperty()
         p.SetAmbient(ambient)
         p.SetDiffuse(diffuse)
         p.SetSpecular(specular)
         try:
-            p.SetSpecularPower(_SKIN_SHININESS)
+            p.SetSpecularPower(_SKIN_SHININESS if shininess is None
+                               else float(shininess))
         except Exception:
             pass
     except Exception:
@@ -559,6 +584,10 @@ class HandRig:
     smooth-unioned mesh deformed by linear-blend skinning from the same IK
     chains (tubes stay as the automatic fallback). `texture_path` overrides
     the procedural skin PNG with a user-supplied photo (same planar UV).
+    `style` picks the look (handspec STYLE_ORDER: cartoon / gloves / robot /
+    skeleton); None reads PIANOPLAYER_HAND_STYLE and falls back to
+    `cartoon`, which is exactly the look that shipped.  A style only changes
+    colours/texture/material -- never geometry, IK or the update() signals.
     """
 
     ROOT_Y = -13.5            # wrist sits behind the front edge of the keys
@@ -578,27 +607,35 @@ class HandRig:
                        # self.COUPLING to solve_chain, rest_chains uses
                        # REST_DIP_RATIO; reach 70/70, worst bend 1.20->1.06)
     SMOOTH_TAU = 0.05    # R1.8: idle-finger x glide time constant [s]
-    
+
     # R5.5: wrist pitch on black keys
     PITCH_BLACK = math.radians(3.0)   # ±3° pitch when black key pressed
     PITCH_VEL_GAIN = 0.002            # rad of pitch per cm/s hand speed
     PITCH_VEL_MAX = math.radians(2.0) # max velocity-induced pitch
     PITCH_TAU = 0.08                  # pitch smoothing time constant [s]
-    
+
     # Motion step 1 (handspec knobs): linked tendons pull followers down
     # (source-faithful, hands._tendon_pull), wrist turn leads the slide,
     # idle fan + linger/return, tremolo roll, run glide.  See update().
     TENDON_TAU = 0.04                 # follower-depth smoothing [s]
 
-    def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,
-                 mesh="skinned", texture_path=None):
+    def __init__(self, side="right", size="M", skin=None, kb_center=None,
+                 mesh="skinned", texture_path=None, style=None):
         self.side = "left" if str(side).lower().startswith("l") else "right"
         self.s = 1.0 if self.side == "right" else -1.0
         self.hf = float(handSizeFactor(size))
-        self.skin = tuple(skin)
+        # Step 2: look lookup (handspec).  `skin=None` = take the style's
+        # base colour; an explicit `skin` still wins (backward compatible).
+        self.style = style_from_env(style)
+        self._look = _HS.style_look(self.style)
+        self.skin = tuple(skin) if skin is not None else tuple(self._look["base"])
         self.mesh_mode = (str(mesh).lower()
                           if str(mesh).lower() in ("tubes", "skinned")
                           else "tubes")
+        if self.style == "skeleton" and self.mesh_mode == "skinned":
+            # bones only: the tubes mesh is the closest 3D equivalent of the
+            # 2D skeleton skin (joint chain + nails/creases carry over).
+            self.mesh_mode = "tubes"
         self.texture_path = texture_path
         # D3: keyboard centre for the arm-yaw shoulder reference (the 88-key
         # span is fixed geometry, so callers need not pass it).
@@ -670,12 +707,18 @@ class HandRig:
         self._actors.append(mesh)
         return mesh
 
+    def _material(self, mesh):
+        """Step 2: apply the style's lighting coefficients to a mesh."""
+        lk = self._look
+        _material(mesh, lk["ambient"], lk["diffuse"], lk["specular"],
+                  lk["shininess"])
+
     def _build(self):
         # arm + palm: one lofted surface, moved as a whole --------------
         pts, nrm, faces = _arm_surface(self.s, self.hf, _ARM_M)
         self.arm, _, _, _ = _skin_mesh(pts, nrm, faces, self.skin)
         self._place(self.arm)
-        _material(self.arm, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+        self._material(self.arm)
         # H3: whole-hand blob shadow sharing the arm dataset.
         self._add_blob(self.arm.dataset)
 
@@ -707,7 +750,7 @@ class HandRig:
                 base_local=self._L(base),
                 pole_local=np.array([spec["pole"][0] * self.s,
                                      spec["pole"][1], spec["pole"][2]]))
-            _material(mesh, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+            self._material(mesh)
             # D6: per-point joint shading (PIP/DIP rings darker and pinker).
             n_pts = K * _FING_M + 2
             t0 = max(0.35, 1.0 - radii[3] / lens[2])
@@ -764,7 +807,7 @@ class HandRig:
             Ellipsoid(pos=(0, 0, 0), axis1=(wr[0], 0, 0),
                       axis2=(0, wr[1], 0), axis3=(0, 0, wr[2]),
                       res=14, c=self.skin))
-        _material(self.web, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+        self._material(self.web)
 
         # Tier B: one smooth-unioned mesh, skinned from the same IK chains.
         # Tubes stay built (fallback + compat buffers); skinned mode hides
@@ -816,31 +859,36 @@ class HandRig:
             except ValueError:
                 _sz = 512
             self._tex_size = _sz if _sz in (512, 1024) else 512
-            # Try package data first (versioned names, either resolution)
-            hf_s = f"{float(self.hf):.2f}"
-            hash8 = _HS.geom_hash()[:8]
-            try:
-                from importlib.resources import files as _files
-                for _sz_try in (self._tex_size, 512, 1024):
-                    pkg_tex = (f"handtex_{self.side}_{hf_s}_{hash8}_"
-                               f"{_HS.TEX_VERSION}{_sz_try}.png")
-                    pkg_path = _files("pianoplayer.data").joinpath(pkg_tex)
-                    if pkg_path.is_file():
-                        tpath = str(pkg_path)
-                        break
-            except Exception:
-                pass
+            # Try package data first (versioned names, either resolution).
+            # Only the default style ships prebuilt: a non-default style is
+            # generated into the user cache (its own filename, see below).
+            if self.style == _HS.STYLE_DEFAULT:
+                hf_s = f"{float(self.hf):.2f}"
+                hash8 = _HS.geom_hash()[:8]
+                try:
+                    from importlib.resources import files as _files
+                    for _sz_try in (self._tex_size, 512, 1024):
+                        pkg_tex = (f"handtex_{self.side}_{hf_s}_{hash8}_"
+                                   f"{_HS.TEX_VERSION}{_sz_try}.png")
+                        pkg_path = _files("pianoplayer.data").joinpath(pkg_tex)
+                        if pkg_path.is_file():
+                            tpath = str(pkg_path)
+                            break
+                except Exception:
+                    pass
         if tpath is None:
             from pianoplayer.handmesh import texture_path as _default_tex
             tpath = _default_tex(self.hf, self.side,
-                                 size=getattr(self, "_tex_size", 512))
+                                 size=getattr(self, "_tex_size", 512),
+                                 style=self.style)
         _tex_ok = False
         try:
             import os as _os
             if not _os.path.isfile(tpath):
                 build_skin_texture(rest, bones, tpath, names=names,
                                    hf=self.hf, side=self.side,
-                                   size=getattr(self, "_tex_size", 512))
+                                   size=getattr(self, "_tex_size", 512),
+                                   style=self.style)
             from PIL import Image as _Image
             with _Image.open(tpath) as _im:
                 _im.verify()  # garbage file -> raise -> keep SKIN below
@@ -853,7 +901,7 @@ class HandRig:
             # White is set ONLY on success (except-branch keeps SKIN).
             _tex_ok = True
             mesh.color((1.0, 1.0, 1.0))
-        _material(mesh, _SKIN_AMBIENT, _SKIN_DIFFUSE, _SKIN_SPECULAR)
+        self._material(mesh)
         B = len(names)
         rigid = np.array([nm in ("forearm", "palm", "f1_cmc") for nm in
                           names])
@@ -939,8 +987,21 @@ class HandRig:
                     self._skin["blush_np"].astype(float) * ao[:, None],
                     0.0, 255.0).astype(np.uint8)
                 self._skin["blush_arr"].Modified()
-            # R4: Skin shading - pinker at joints/tips, lighter on dorsum, +-3% noise
-            self._apply_skin_shading(rest32, nrm32, names, idx, w32)
+            # R4: Skin shading - pinker at joints/tips, lighter on dorsum,
+            # +-3% noise. Step 2: cartoon-only (a glove/shell is not made of
+            # skin; those styles get STYLE_BANDS instead, see _style_bands).
+            if self.style == STYLE_DEFAULT:
+                self._apply_skin_shading(rest32, nrm32, names, idx, w32)
+            else:
+                # Step 2: the style bands only exist in the vertex colours,
+                # so this style needs them sampled (the shipped look leaves
+                # scalar visibility off and relies on the texture alone).
+                try:
+                    mesh.mapper.SetScalarVisibility(1)
+                except Exception:
+                    pass
+                self._apply_style_bands(rest32, names, bones, idx, w32,
+                                        _tex_ok)
             # Update blush_rest after shading
             self._skin["blush_rest"] = self._skin["blush"].copy()
         except Exception:
@@ -1139,14 +1200,17 @@ class HandRig:
         g = self._geom[f]
         a = float(min(max(amount, 0.0), 1.0))
         w = _smoothstep(0.6, 1.0, g["snorm"]) * a
-        skin = np.asarray(SKIN, float)[None, :]
-        pr = np.asarray(SKIN_PRESS, float)[None, :]
+        # step 2: the palette is the style's; cartoon resolves to the
+        # module SKIN/SKIN_PRESS/nail constants, so the default is unchanged.
+        lk = self._look
+        skin = np.asarray(lk["base"], float)[None, :]
+        pr = np.asarray(lk["press"], float)[None, :]
         base = skin + (pr - skin) * w[:, None]
         nm = g["nailm"]
-        if bool(nm.any()):
-            sk = np.asarray(SKIN, float)[None, :]
-            patch = np.asarray(_NAIL_PATCH, float)[None, :]
-            base[nm] = sk * (1.0 - _NAIL_MIX) + patch * _NAIL_MIX
+        if bool(nm.any()) and lk["nail_mix"] > 0.0:
+            sk = np.asarray(lk["base"], float)[None, :]
+            patch = np.asarray(lk["nail"], float)[None, :]
+            base[nm] = sk * (1.0 - lk["nail_mix"]) + patch * lk["nail_mix"]
         # H3: contact AO: the pad side near the tip darkens with the press,
         # grounding the fingertip on its key (disjoint from the nail patch).
         ao = (_smoothstep(0.55, 1.0, g["snorm"]) * a
@@ -1182,8 +1246,8 @@ class HandRig:
             base = np.asarray(S.get("blush_base", (255, 255, 255)),
                               float)[None, :]
             rgb[m] = (np.clip(
-                base * (1.0 - w[m, None] * (1.0 - np.asarray(_SKIN_PRESS_MUL,
-                                                            float)[None, :])),
+                base * (1.0 - w[m, None] * (1.0 - np.asarray(
+                    self._look["press_mul"], float)[None, :])),
                 0.0, 255.0) + 0.5).astype(np.uint8)
             # released verts back to the base (white textured, SKIN plain)
             m0 = (S["dom"] == (f - 1)) & (w == 0.0)
@@ -1192,6 +1256,99 @@ class HandRig:
             else:
                 rgb[m0] = np.asarray(S.get("blush_base", (255, 255, 255)),
                                      np.uint8)
+            S["blush_arr"].Modified()
+            S["mesh"].actor.Modified()
+        except Exception:
+            pass
+
+    # Step 2: per-style vertex-colour bands on the skinned mesh
+    def _apply_style_bands(self, rest, names, bones, idx, w, tex_ok):
+        """Style bands on the skinned mesh (baked, no per-frame cost).
+
+        The vertex RGB scalars MULTIPLY the texture, so the bands are dark
+        tints over the style's texture variant.  Cartoon returns immediately
+        (the shipped look keeps `_apply_skin_shading`).
+
+        * `gloves`: dark thin arm + a pale puffy cuff across the wrist
+          (source: thin black arm + puffy cuff).  Selected by rest-frame y:
+          everything proximal to `cuff_y` is the arm, the band just distal
+          to it is the cuff.
+        * `robot`: dark metal joint cylinders at the MCP/PIP/DIP and dark
+          caps over the fingertips (source: joint cylinders + tip caps).
+          The joints are found as a *band* along each rest bone (a short
+          slice near either end), not as a sphere on the joint centre: the
+          bones run down the middle of the mesh, so a centre-distance ring
+          never reaches the surface.  Tip caps are a sphere on the last
+          joint (that one IS on the surface).
+        * `skeleton`: never reaches here (tubes mode).
+        """
+        try:
+            S = self._skin
+            if S is None or "blush" not in S:
+                return
+            st = self.style
+            bands = self._look.get("bands") or {}
+            if not bands:
+                return
+            P = np.asarray(rest, float)
+            rgb = S["blush"].astype(float) / 255.0
+            hf = max(self.hf, 1e-6)
+            # bone segments + tip centres in rest frame, from the same bones
+            # the texture uses (side-local, exactly as build_skin_texture).
+            segs, tp = [], []
+            for nm, (a, b) in zip(names, bones):
+                if nm.startswith("f") and "_" in nm and nm[-1] in "012":
+                    a = np.asarray(a, float)
+                    b = np.asarray(b, float)
+                    segs.append((a, b))
+                    if nm.endswith("_2"):
+                        tp.append(b)
+            if st == "gloves":
+                y = P[:, 1]
+                yc = bands["cuff_y"] * hf
+                arm = np.clip((yc - y) / max(bands["cuff_h"] * hf, 1e-6),
+                              0.0, 1.0)[:, None]
+                cuff = np.clip(
+                    1.0 - np.abs(y - (yc + 0.5 * bands["cuff_h"] * hf))
+                    / max(0.5 * bands["puff_h"] * hf, 1e-6), 0.0, 1.0)[:, None]
+                col = np.asarray(bands["cuff_col"], float)[None, :]
+                rgb *= (1.0 - arm * (1.0 - col))       # dark arm
+                # puffy cuff: lighter than the shell, softer (smoothstep-ish)
+                puff = np.asarray(bands["puff_col"], float)[None, :]
+                rgb *= (1.0 - cuff * (1.0 - puff))    # paler cuff band
+            else:                                   # robot
+                ring = np.zeros(P.shape[0])
+                wr = max(bands["joint_r"] * hf, 1e-6)      # band half-length
+                wrad = max(bands["joint_band_r"] * hf, 1e-6)  # radial reach
+                for a, b in segs:
+                    ab = b - a
+                    L2 = float(np.dot(ab, ab))
+                    if L2 < 1e-12:
+                        continue
+                    t = np.clip((P - a[None, :]) @ ab / L2, 0.0, 1.0)
+                    near = a[None, :] + t[:, None] * ab[None, :]
+                    d = np.linalg.norm(P - near, axis=1)
+                    radial = np.exp(-(d / wrad) ** 2)
+                    for end in (0.0, 1.0):
+                        u = np.abs(t - end)
+                        ring = np.maximum(ring,
+                                          radial * np.exp(-(u / wr) ** 2))
+                ring = ring[:, None]
+                if tp:
+                    dt = np.min(np.stack([np.linalg.norm(P - q[None, :],
+                                                         axis=1)
+                                          for q in tp]), axis=0)
+                    tr = max(bands["tip_r"] * hf, 1e-6)
+                    cap = np.clip(1.0 - (dt / tr) ** 2, 0.0, 1.0)[:, None]
+                else:
+                    cap = np.zeros((P.shape[0], 1))
+                rgb *= (1.0 - ring * 0.92)
+                rgb *= (1.0 - cap * 0.88)
+            if not tex_ok:
+                # no texture to multiply: the style's own base colour goes in
+                rgb = np.clip(rgb, 0.0, 1.0)
+            S["blush_np"][:] = (np.clip(rgb, 0.0, 1.0) * 255.0 + 0.5
+                                ).astype(np.uint8)
             S["blush_arr"].Modified()
             S["mesh"].actor.Modified()
         except Exception:
@@ -1306,7 +1463,7 @@ class HandRig:
             mapper.SetScalarVisibility(False)
             actor = vtkActor()
             actor.SetMapper(mapper)
-            actor.GetProperty().SetColor(*_SHADOW_COL)
+            actor.GetProperty().SetColor(*self._look["shadow"])
             try:
                 actor.GetProperty().LightingOff()
             except Exception:

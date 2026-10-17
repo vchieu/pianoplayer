@@ -86,19 +86,27 @@ def _load_cache(path):
     return None
 
 
-def texture_path(hf=None, side=None, size=None):
-    """Per-(hf, side) texture (R1.5); bare call returns the legacy file.
+def texture_path(hf=None, side=None, size=None, style=None):
+    """Per-(hf, side, style) texture (R1.5); bare call returns the legacy file.
 
     `size` selects the resolution variant (512 default, 1024 via
     PIANOPLAYER_TEXSIZE); each size has its own cache file carrying
-    TEX_VERSION, so look upgrades rebuild once and then load fast."""
+    TEX_VERSION, so look upgrades rebuild once and then load fast.
+
+    Step 2: a non-default `style` (handspec STYLE_ORDER) appends its name to
+    the cache filename -- the style is painted, not meshed, so it never
+    touches geom_hash()/HANDMESH_VERSION. The default style keeps the plain
+    name, so existing caches (and the prebuilt package textures) still hit."""
     if hf is None or side is None:
         return os.path.join(cache_dir(), TEX_NAME)
     s = "left" if str(side).lower().startswith("l") else "right"
     sz = int(size or H.TEX_SIZE_DEFAULT)
+    st = H.normalize_style(style) if style else H.STYLE_DEFAULT
+    mark = "" if st == H.STYLE_DEFAULT else st
     return os.path.join(cache_dir(),
-                        "handtex_%s_%.2f_%s_%s%d.png"
-                        % (s, float(hf), H.geom_hash(), H.TEX_VERSION, sz))
+                        "handtex_%s_%.2f_%s_%s%s%d.png"
+                        % (s, float(hf), H.geom_hash(), H.TEX_VERSION,
+                           mark, sz))
 
 
 def _cache_hash_of(fn):
@@ -995,32 +1003,43 @@ def _value_noise(size, cells, seed):
                                  Image.BILINEAR)).astype(np.float32) / 255.0
 
 
-def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
-                       side="right", size=None):
-    """Procedural skin PNG: tone noise, joint/palm creases, nails.
+# Step 2 (skins): per-style procedural texture. Idea-port of
+# pygame-piano-animator `skins.py` -- the source *draws* 2D polygons; here the
+# same looks are painted into the same planar-UV texture the mesh already
+# samples (same bone-anchored joints/tips, same crease/nail geometry) with a
+# different palette and detail set.
+#   cartoon  : unchanged skin tone + creases + nails (the shipped look)
+#   gloves   : white latex, dark stitching along the back of each finger and
+#              around the knuckle line, faint grey shading in the webs
+#   robot    : white shell plates split by dark joint gaps, dark tip caps,
+#              a gloss band along the lit side of each finger
+# Everything below is generated from the same (rest_pts, bones) inputs, so it
+# lines up on every (hf, side) pair exactly like the cartoon variant.
+STYLE_TEX = {
+    "cartoon": dict(base=(0.95, 0.80, 0.70), tone=0.03,
+                    creases=True, nails=True, blush=True, pore=True,
+                    tendon=True, palm_arcs=True,
+                    # seam_hi/seam_lo bracket the light ridge of each crease
+                    seam_hi=(120, 70, 60, 60), seam_lo=(120, 70, 60, 46),
+                    ridge=(255, 235, 225, 70),
+                    nail_col=(247, 209, 189, 255)),
+    "gloves": dict(base=(0.965, 0.965, 0.975), tone=0.012,
+                   creases=False, nails=False, blush=False, pore=False,
+                   tendon=False, palm_arcs=False,
+                   seam_hi=(90, 90, 100, 70), seam_lo=(90, 90, 100, 55),
+                   ridge=(255, 255, 255, 60),
+                   nail_col=(250, 250, 250, 255)),
+    "robot": dict(base=(0.915, 0.915, 0.905), tone=0.010,
+                  creases=False, nails=True, blush=False, pore=False,
+                  tendon=True, palm_arcs=True,
+                  seam_hi=(62, 64, 70, 190), seam_lo=(62, 64, 70, 150),
+                  ridge=(255, 255, 255, 80),
+                  nail_col=(58, 58, 62, 255)),
+}
 
-    Rendered from side-local bones, so creases/nails align on every (hf,
-    side) pair (R1.5); the pore speckle seed differs per side so the files
-    are never accidentally shared. `size` is the edge in px (512 default,
-    1024 via PIANOPLAYER_TEXSIZE=1024 env or explicit arg) -- 0 frame cost,
-    ~4x VRAM for the hi-res variant.
-    """
-    from PIL import Image, ImageDraw
-    if size is None:
-        try:
-            size = int(os.environ.get("PIANOPLAYER_TEXSIZE", "512"))
-        except ValueError:
-            size = 512
-    S = int(size) if int(size) in (512, 1024) else 512
-    base = np.array([0.95, 0.80, 0.70], float)
-    n1 = _value_noise(S, 24, 7)
-    n2 = _value_noise(S, 96, 13)
-    tone = 1.0 + 0.03 * (0.65 * (n1 - 0.5) * 2.0 + 0.35 * (n2 - 0.5) * 2.0)
-    img = np.empty((S, S, 3), float)
-    for i in range(3):
-        img[..., i] = base[i] * tone
-    pil = Image.fromarray((np.clip(img, 0, 1) * 255.0 + 0.5).astype(np.uint8))
-    dr = ImageDraw.Draw(pil, "RGBA")
+
+def _tex_frame(rest_pts, S):
+    """Planar top-down pixel mapping shared by every style variant."""
     p = np.asarray(rest_pts, float)
     xmin, xmax = p[:, 0].min(), p[:, 0].max()
     ymin, ymax = p[:, 1].min(), p[:, 1].max()
@@ -1030,10 +1049,12 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
     def to_px(x, y):
         return ((float(x) - xmin) / W * (S - 1),
                 (float(y) - ymin) / H * (S - 1))
+    return to_px, W, H
 
-    # finger joints + tips from the bone segments
-    joints = {}
-    tips = {}
+
+def _tex_joints(bones, names):
+    """{finger: (mcp, pip, dip)} + {finger: tip} from the rest bones."""
+    joints, tips = {}, {}
     if names is not None:
         by_name = {nm: (np.asarray(a, float), np.asarray(b, float))
                    for nm, (a, b) in zip(names, bones)}
@@ -1057,91 +1078,177 @@ def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
             joints[f] = (np.asarray(a, float), np.asarray(b, float),
                          np.asarray(b1, float))
             tips[f] = np.asarray(b2, float)
+    return joints, tips
+
+
+def build_skin_texture(rest_pts, bones, out_png, names=None, hf=0.82,
+                       side="right", size=None, style=None):
+    """Procedural skin PNG: tone noise, joint/palm creases, nails.
+
+    Rendered from side-local bones, so creases/nails align on every (hf,
+    side) pair (R1.5); the pore speckle seed differs per side so the files
+    are never accidentally shared. `size` is the edge in px (512 default,
+    1024 via PIANOPLAYER_TEXSIZE=1024 env or explicit arg) -- 0 frame cost,
+    ~4x VRAM for the hi-res variant.
+
+    Step 2: `style` (handspec STYLE_ORDER) picks the skin variant --
+    `cartoon` (default, pixel-identical to the shipped look), `gloves`,
+    `robot`. `skeleton` never renders here (it uses the tubes mesh)."""
+    from PIL import Image, ImageDraw
+    if size is None:
+        try:
+            size = int(os.environ.get("PIANOPLAYER_TEXSIZE", "512"))
+        except ValueError:
+            size = 512
+    S = int(size) if int(size) in (512, 1024) else 512
+    style = H.normalize_style(style)
+    T = STYLE_TEX.get(style, STYLE_TEX[H.STYLE_DEFAULT])
+    base = np.array(T["base"], float)
+    n1 = _value_noise(S, 24, 7)
+    n2 = _value_noise(S, 96, 13)
+    tone = 1.0 + T["tone"] * (0.65 * (n1 - 0.5) * 2.0
+                              + 0.35 * (n2 - 0.5) * 2.0)
+    img = np.empty((S, S, 3), float)
+    for i in range(3):
+        img[..., i] = base[i] * tone
+    pil = Image.fromarray((np.clip(img, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+    dr = ImageDraw.Draw(pil, "RGBA")
+    # `H` is the imported handspec module here, so the frame height is HT
+    to_px, W, HT = _tex_frame(rest_pts, S)
+
+    joints, tips = _tex_joints(bones, names)
+    seam_hi = tuple(T["seam_hi"])
+    seam_lo = tuple(T["seam_lo"])
+    ridge = tuple(T["ridge"])
+
     # metacarpal tendon valleys: soft dark longitudinal lines on the dorsum
     # between the finger bases (the sample photo shows clear tendon shading;
     # flat tone noise cannot produce it). Positions from the MCP bases.
-    try:
-        mcps = [joints[f][0] for f in (2, 3, 4, 5) if f in joints]
-        if len(mcps) == 4:
-            xs = sorted([float(m[0]) for m in mcps])
-            y1 = max(float(m[1]) for m in mcps)
-            y0 = y1 - 8.0 * float(hf)
-            for xa, xb in zip(xs, xs[1:]):
-                xm = 0.5 * (xa + xb)
-                x0, yy0 = to_px(xm, y0)
-                x1, yy1 = to_px(xm, y1)
-                for dx, col in ((-2, (150, 100, 90, 34)),
-                                (0, (150, 100, 90, 44)),
-                                (2, (150, 100, 90, 34))):
-                    dr.line([(x0 + dx, yy0), (x1 + dx, yy1)],
-                            fill=col, width=4)
-    except Exception:
-        pass
+    if T["tendon"]:
+        try:
+            mcps = [joints[f][0] for f in (2, 3, 4, 5) if f in joints]
+            if len(mcps) == 4:
+                xs = sorted([float(m[0]) for m in mcps])
+                y1 = max(float(m[1]) for m in mcps)
+                y0 = y1 - 8.0 * float(hf)
+                for xa, xb in zip(xs, xs[1:]):
+                    xm = 0.5 * (xa + xb)
+                    x0, yy0 = to_px(xm, y0)
+                    x1, yy1 = to_px(xm, y1)
+                    for dx, col in ((-2, (150, 100, 90, 34)),
+                                    (0, (150, 100, 90, 44)),
+                                    (2, (150, 100, 90, 34))):
+                        dr.line([(x0 + dx, yy0), (x1 + dx, yy1)],
+                                fill=col, width=4)
+        except Exception:
+            pass
     # joint-crease bands (~12% dark + light ridge) across each finger u-span
     for f, (qm, qp, qd) in joints.items():
         r = 0.95 * float(hf)
         for j in (qm, qp, qd):
             x0, y0 = to_px(j[0] - r, j[1])
             x1, y1 = to_px(j[0] + r, j[1])
-            for dy, col in ((-3, (120, 70, 60, 60)), (-1, (255, 235, 225, 70)),
-                            (1, (120, 70, 60, 46))):
+            for dy, col in ((-3, seam_hi), (-1, ridge), (1, seam_lo)):
                 dr.line([(x0, y0 + dy), (x1, y1 + dy)], fill=col, width=3)
+        if not T["creases"]:
+            # gloves/robot: dark *stitching* across the back of the finger
+            # instead of a skin crease (dashed, read as sewn thread).
+            for j in (qm, qp, qd):
+                x0, y0 = to_px(j[0] - r, j[1])
+                x1, y1 = to_px(j[0] + r, j[1])
+                for k in range(7):
+                    ta = k / 7.0
+                    tb = ta + 0.5 / 7.0
+                    dr.line([(x0 + (x1 - x0) * ta, y0 + (y1 - y0) * ta),
+                             (x0 + (x1 - x0) * tb, y0 + (y1 - y0) * tb)],
+                            fill=(70, 70, 78, 150) if style == "gloves"
+                            else seam_hi, width=2)
     # palm-crease arcs
-    for (x0, y0, x1, y1) in ((-2.5, 3.0, 3.5, 5.5), (-3.0, 1.0, 2.5, 3.0),
-                             (0.5, 0.0, 4.0, 4.0)):
-        try:
-            ax0, ay0 = to_px(x0 * float(hf), y0 * float(hf))
-            ax1, ay1 = to_px(x1 * float(hf), y1 * float(hf))
-            dr.arc([ax0, ay0 - 30, ax1, ay1 + 30], 200, 340,
-                   fill=(130, 75, 65, 55), width=3)
-        except Exception:
-            pass
-    # nails: pinkish ellipse with a whiter tip + cuticle arc (R4: boost contrast)
-    for f, t in tips.items():
-        try:
-            r = 0.50 * float(hf)
-            x0, y0 = to_px(t[0] - r, t[1] - 1.15 * float(hf))
-            x1, y1 = to_px(t[0] + r, t[1] - 0.10 * float(hf))
-            # Base nail color (within 8% of skin tone)
-            skin_r, skin_g, skin_b = 247, 209, 189  # base skin-ish
-            # Brighter rim (lunula area) - 8% lighter
-            rim_r, rim_g, rim_b = min(255, int(skin_r * 1.08)), min(255, int(skin_g * 1.08)), min(255, int(skin_b * 1.08))
-            # Whiter tip - 3% lighter than rim (was 6%: blew out to white
-            # blobs on curled fingertips in side views)
-            tip_r, tip_g, tip_b = min(255, int(rim_r * 1.03)), min(255, int(rim_g * 1.03)), min(255, int(rim_b * 1.03))
-            # Cuticle - 10% darker
-            cut_r, cut_g, cut_b = int(skin_r * 0.9), int(skin_g * 0.9), int(skin_b * 0.9)
-            
-            dr.ellipse([x0, y0, x1, y1], fill=(skin_r, skin_g, skin_b, 255))
-            # Lunula (proximal half-moon) - slightly lighter
-            dr.ellipse([x0 + 2, y0 + 2, x1 - 2, y0 + (y1 - y0) * 0.55],
-                       fill=(rim_r, rim_g, rim_b, 255))
-            # Tip highlight - brightest
-            dr.ellipse([x0 + 4, y0 + (y1 - y0) * 0.55, x1 - 4, y1 - 2],
-                       fill=(tip_r, tip_g, tip_b, 255))
-            # Cuticle arc - darker
-            dr.arc([x0, y0, x1, y1], 100, 260, fill=(cut_r, cut_g, cut_b, 180),
-                   width=2)
-            # Subtle rim highlight
-            dr.arc([x0 + 1, y0 + 1, x1 - 1, y1 - 1], 270, 90, fill=(tip_r, tip_g, tip_b, 100),
-                   width=1)
-        except Exception:
-            pass
+    if T["palm_arcs"]:
+        for (x0, y0, x1, y1) in ((-2.5, 3.0, 3.5, 5.5), (-3.0, 1.0, 2.5, 3.0),
+                                 (0.5, 0.0, 4.0, 4.0)):
+            try:
+                ax0, ay0 = to_px(x0 * float(hf), y0 * float(hf))
+                ax1, ay1 = to_px(x1 * float(hf), y1 * float(hf))
+                dr.arc([ax0, ay0 - 30, ax1, ay1 + 30], 200, 340,
+                       fill=seam_hi if style == "robot"
+                       else (130, 75, 65, 55), width=3)
+            except Exception:
+                pass
+    # nails: pinkish ellipse with a whiter tip + cuticle arc (R4: boost
+    # contrast).  Robot reuses the ellipse as its dark fingertip cap.
+    if T["nails"]:
+        for f, t in tips.items():
+            try:
+                r = 0.50 * float(hf)
+                x0, y0 = to_px(t[0] - r, t[1] - 1.15 * float(hf))
+                x1, y1 = to_px(t[0] + r, t[1] - 0.10 * float(hf))
+                # Base nail color (within 8% of skin tone)
+                skin_r, skin_g, skin_b = 247, 209, 189  # base skin-ish
+                # Brighter rim (lunula area) - 8% lighter
+                rim_r, rim_g, rim_b = min(255, int(skin_r * 1.08)), min(255, int(skin_g * 1.08)), min(255, int(skin_b * 1.08))
+                # Whiter tip - 3% lighter than rim (was 6%: blew out to white
+                # blobs on curled fingertips in side views)
+                tip_r, tip_g, tip_b = min(255, int(rim_r * 1.03)), min(255, int(rim_g * 1.03)), min(255, int(rim_b * 1.03))
+                # Cuticle - 10% darker
+                cut_r, cut_g, cut_b = int(skin_r * 0.9), int(skin_g * 0.9), int(skin_b * 0.9)
+
+                if style == "robot":
+                    nc = T["nail_col"]
+                    dr.ellipse([x0, y0, x1, y1], fill=nc)
+                    dr.arc([x0, y0, x1, y1], 100, 260,
+                           fill=(150, 152, 158, 160), width=2)
+                    dr.ellipse([x0 + 2, y0 + 2, x0 + (x1 - x0) * 0.45,
+                                y0 + (y1 - y0) * 0.4],
+                               fill=(120, 122, 130, 190))
+                    continue
+                dr.ellipse([x0, y0, x1, y1], fill=(skin_r, skin_g, skin_b, 255))
+                # Lunula (proximal half-moon) - slightly lighter
+                dr.ellipse([x0 + 2, y0 + 2, x1 - 2, y0 + (y1 - y0) * 0.55],
+                           fill=(rim_r, rim_g, rim_b, 255))
+                # Tip highlight - brightest
+                dr.ellipse([x0 + 4, y0 + (y1 - y0) * 0.55, x1 - 4, y1 - 2],
+                           fill=(tip_r, tip_g, tip_b, 255))
+                # Cuticle arc - darker
+                dr.arc([x0, y0, x1, y1], 100, 260, fill=(cut_r, cut_g, cut_b, 180),
+                       width=2)
+                # Subtle rim highlight
+                dr.arc([x0 + 1, y0 + 1, x1 - 1, y1 - 1], 270, 90, fill=(tip_r, tip_g, tip_b, 100),
+                       width=1)
+            except Exception:
+                pass
+    # robot: a gloss band along the lit side of each shell plate (the source
+    # draws it as a highlight line down every finger segment)
+    if style == "robot":
+        for f, (qm, qp, qd) in joints.items():
+            for a, b in ((qm, qp), (qp, qd)):
+                try:
+                    x0, y0 = to_px(a[0], a[1])
+                    x1, y1 = to_px(b[0], b[1])
+                    dx, dy = x1 - x0, y1 - y0
+                    L = float(np.hypot(dx, dy)) or 1.0
+                    ox, oy = -dy / L * 3.0, dx / L * 3.0
+                    dr.line([(x0 + ox, y0 + oy), (x1 + ox, y1 + oy)],
+                            fill=(255, 255, 255, 110), width=3)
+                except Exception:
+                    pass
     arr = np.asarray(pil).astype(np.float32) / 255.0
     # fingertip / palm-edge blush (warm, subtle)
-    yy, xx = np.mgrid[0:S, 0:S]
-    blush = np.zeros((S, S), float)
-    for f, t in tips.items():
-        cx, cy = to_px(t[0], t[1])
-        blush += np.exp(-(((xx - cx) / 26.0) ** 2 + ((yy - cy) / 30.0) ** 2))
-    blush = np.clip(blush, 0, 1) * 0.5
-    arr[..., 0] = np.clip(arr[..., 0] + 0.015 * blush, 0, 1)
-    arr[..., 1] = np.clip(arr[..., 1] - 0.010 * blush, 0, 1)
-    arr[..., 2] = np.clip(arr[..., 2] - 0.008 * blush, 0, 1)
+    if T["blush"]:
+        yy, xx = np.mgrid[0:S, 0:S]
+        blush = np.zeros((S, S), float)
+        for f, t in tips.items():
+            cx, cy = to_px(t[0], t[1])
+            blush += np.exp(-(((xx - cx) / 26.0) ** 2 + ((yy - cy) / 30.0) ** 2))
+        blush = np.clip(blush, 0, 1) * 0.5
+        arr[..., 0] = np.clip(arr[..., 0] + 0.015 * blush, 0, 1)
+        arr[..., 1] = np.clip(arr[..., 1] - 0.010 * blush, 0, 1)
+        arr[..., 2] = np.clip(arr[..., 2] - 0.008 * blush, 0, 1)
     # pore speckle (seed per side: the files must never be shared, R1.5)
-    rng = np.random.default_rng(29 if str(side).lower().startswith("r")
-                                else 31)
-    arr *= (1.0 + (rng.random((S, S)) - 0.5) * 0.018)[..., None]
+    if T["pore"]:
+        rng = np.random.default_rng(29 if str(side).lower().startswith("r")
+                                     else 31)
+        arr *= (1.0 + (rng.random((S, S)) - 0.5) * 0.018)[..., None]
     out = Image.fromarray((np.clip(arr, 0, 1) * 255.0 + 0.5).astype(np.uint8))
     try:
         os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)

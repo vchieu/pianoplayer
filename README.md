@@ -163,6 +163,17 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
     busy ones, so the hand's shape keeps following the notes;
   - *gestures*: the wrist glides through scale runs, rocks the forearm in fast
     repeated-note (tremolo) figures, and bounces on repeated chords;
+- **hand styles** (ported from the same 2D project's skin styles; idea-port --
+  the source draws 2D top-down polygons, here the looks are expressed as
+  texture variants + vertex-colour bands + material coefficients, so nothing
+  about the geometry or the IK changes): `cartoon` (default -- skin tone,
+  creases, nails; exactly the look that shipped), `gloves` (white latex with
+  stitching, dark thin arm and a pale puffy cuff), `robot` (white shell
+  plates with dark metal joint cylinders, dark fingertip caps and a gloss
+  highlight) and `skeleton` (bones only: dark tubes). Pick one with
+  `--hand-style` (CLI) or `PIANOPLAYER_HAND_STYLE`; each non-default style
+  gets its own texture cache file, and `test_hand_render.py` renders one
+  offscreen frame per style;
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent; repeated same-pitch
   notes get a visual release `v_off` earlier than the audio `t_off`, so the
@@ -261,6 +272,12 @@ This option only applies to the legacy sliding-window search mode; the default s
   tremolo rock) live in the "motion step 1" block of `pianoplayer/handspec.py`
   and can be retuned there; they never affect the fingering, and they are
   excluded from the mesh cache hash, so tuning them does not rebuild anything.
+- The hand skin: `--hand-style cartoon|gloves|robot|skeleton` (CLI, 3D
+  player only) or `PIANOPLAYER_HAND_STYLE`; default `cartoon`. The palettes,
+  material coefficients and vertex-colour bands live in the "Skins" block of
+  `pianoplayer/handspec.py`. A style only changes how the hand is painted --
+  never its geometry, IK or reach -- and it is excluded from the mesh cache
+  hash (only the texture filename carries it).
 
 ## Limitations
 - Awkward crossings (e.g. the 3rd finger over the 4th) are allowed but pay a

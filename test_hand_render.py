@@ -89,6 +89,22 @@ def shot(name, views, rigs, focus=(52, -6, 3)):
         print("wrote", path)
 
 
+def style_shot(style):
+    """Render one offscreen frame per skin style (step 2 acceptance loop).
+
+    Every style must build and render offscreen without raising.  The
+    `cartoon` frame is the shipped look (kept in the same pose as the other
+    shots so the PNGs can be compared side by side); `skeleton` falls back
+    to the tubes mesh by design.
+    """
+    from pianoplayer import handspec as H
+    assert style in H.STYLE_ORDER, "unknown style %r" % (style,)
+    rig = HandRig(side="right", size="M", style=style)
+    rig.settle(fan("right", "M", 3, 50.68), {3: 1.0})
+    shot("style_%s" % style, ("top",), [rig])
+    return rig
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
 
@@ -116,6 +132,16 @@ def main():
     r1 = pose("right", "M", 3, 66.0, {3: 1.0})
     r2 = pose("left", "M", 2, 40.0, {3: 1.0})
     shot("wide", ("wide",), [r1, r2])
+
+    # step 2: every hand style renders offscreen (skeleton uses tubes)
+    from pianoplayer import handspec as H
+    for st in H.STYLE_ORDER:
+        try:
+            rig = style_shot(st)
+            print("style %-8s OK (mesh=%s)" % (st, rig.mesh_mode))
+        except Exception as exc:
+            print("style %-8s FAIL: %s" % (st, exc))
+            raise
     return 0
 
 

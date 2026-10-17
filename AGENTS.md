@@ -17,7 +17,7 @@ Each `test_*.py` is a standalone script, not a pytest suite. Run from repo root:
 ```bash
 python test_audio.py          # offline synth checks (FFT, envelope, timing)
 python test_play.py           # headless 3D-frame smoke test -> ./test_play_out/*.png
-python test_hand_render.py    # offscreen hand poses -> ./test_hand_render/*.png
+python test_hand_render.py    # offscreen hand poses + a per-style loop (4 skins) -> ./test_hand_render/*.png
 python test_shadow.py         # vtkShadowMapPass pipeline sanity
 python test_sound.py          # legacy simpleaudio chord playback
 python test_regression.py     # finger/key/audio/fingering consistency, offscreen, no audio device
@@ -52,9 +52,9 @@ build manifest.
 | `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` (duplicate-chord behaviour unchanged; CLI/GUI import path only) |
 | `pianoplayer/pigloader.py` | PIG dataset loading via `load_pig()` (chords included, note-weighted-average evaluation) |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
-| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`), hand motion step 1 (anticipation / wrist fit / tendon fan) |
-| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`) and the motion knobs (not hashed); `hand3d` and `handmesh` both import from here |
-| `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture |
+| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`), hand motion step 1 (anticipation / wrist fit / tendon fan), skin styles step 2 (`style=` + vertex-colour bands) |
+| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`), the motion knobs and the skin-style palettes/materials/bands (none hashed); `hand3d` and `handmesh` both import from here |
+| `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture (+ per-style texture variants) |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
 | `pianoplayer/falling.py` | Synthesia-style falling notes: pure numpy bar/digit geometry + VTK `FallingNotes` layer |
@@ -361,6 +361,48 @@ cache; 2D inches/model units became cm × `hf/0.82` like `_REST_REF_HF`):
   `TREM_ROLL_MAX` 0.07 rad after `TREM_MIN_NOTES` 4 onsets, striking side down,
   and a caller may add its own `roll=` on `update()`.
 
+**Hand styles, step 2** (ported from `pygame-piano-animator/skins.py`; idea-port,
+not line-port -- the source *draws* 2D top-down polygons, here the same looks
+are expressed as a texture variant + vertex-colour bands + material
+coefficients; every knob lives in the "Skins" block of `handspec.py`, all
+deliberately **excluded from `geom_hash()`** -- a style is painted, never
+re-meshed, and only the texture filename carries it):
+
+- `HandRig(..., style=)` is a new **optional** kwarg (last position). `None`
+  reads `PIANOPLAYER_HAND_STYLE`, then falls back to `cartoon`
+  (`hand3d.style_from_env`, same pattern as `PIANOPLAYER_FALLING`); the CLI
+  `--hand-style` overrides the env (`VirtualKeyboard.hand_style`). An unknown
+  name normalises to `cartoon` (`handspec.normalize_style`).
+- `cartoon` (default) is the look that shipped, **pixel-identical**: it keeps
+  `SKIN` / `SKIN_PRESS` / the nail patch / `_SKIN_PRESS_MUL` / the blob shadow
+  colour and the `SKIN_*` material, its texture variant draws the same marks
+  from the same `(rest_pts, bones)` inputs (verified byte-identical PNG), and
+  it skips the new code paths entirely (`_apply_skin_shading`, scalar
+  visibility stays off, plain cache filename -- prebuilt package textures still
+  hit). `TEX_VERSION` is **not** bumped. `geom_hash()` untouched.
+- `gloves`: white latex texture variant (stitched knuckles instead of skin
+  creases) + vertex-colour bands (`hand3d._apply_style_bands`): dark thin arm
+  and a pale puffy cuff across the wrist, selected by rest-frame y.
+- `robot`: white shell plates with dark seams and a gloss line per plate +
+  dark metal joint cylinders (a *band* along each rest bone near either end --
+  the bones run down the middle of the mesh, so a centre-distance ring never
+  reaches the surface) and dark fingertip caps (a sphere on the last joint).
+  Specular 0.30 / shininess 40: 0.48/64 blew the white shell to pure white and
+  swallowed the very rings and caps the style is made of.
+- `skeleton`: bones only -- forced to `mesh="tubes"` (the closest 3D equivalent
+  of the 2D bone drawing; tubes already existed) with a dark palette; no
+  texture is built.
+- Because the skinned mesh leaves scalar visibility off (a pre-existing VTK
+  quirk: `MapScalars` on, but the visibility flag off), a style that needs
+  vertex colours turns it on (`mesh.mapper.SetScalarVisibility(1)`) -- only
+  for non-default styles.
+- The tube path (`_paint`, the fallback and the skeleton style) reads the same
+  `self._look` palette, so a style looks right in either mesh mode.
+- `handmesh.texture_path(hf, side, size, style)` appends the style name to the
+  cache filename for non-default styles only (`handtex_<side>_<hf>_<hash8>_v3
+  <style><size>.png`); `_cache_hash_of` still parses the hash, so
+  `--prune-cache` keeps current-style files.
+
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
 
 **Playback timing** (`_events_for` / `_beat_seconds`): note onsets and
@@ -442,7 +484,9 @@ accuracy vs IK `q[3]` ≤0.05 cm in press/rest poses; L/R mirror symmetry holds.
 
 **Procedural skin texture** (`handmesh.build_skin_texture`): 512² default,
 1024² via `PIANOPLAYER_TEXSIZE=1024` (own versioned cache file), PNG written
-to cache dir (`handtex_{side}_{hf:.2f}_{geomhash}_{TEX_VERSION}{size}.png`), loaded via path; `texture_path` ctor param
+to cache dir (`handtex_{side}_{hf:.2f}_{geomhash}_{TEX_VERSION}{style}{size}.png`,
+the `{style}` marker empty for the default so existing caches and the prebuilt
+package textures keep hitting), loaded via path; `texture_path` ctor param
 overrides with user photo (same planar UV). Base tone `(0.95,0.80,0.70)` ±3%
 two-octave value noise (PIL upscaled). Joint-crease bands (~12% dark + light
 ridge) at each finger's MCP/PIP/DIP v-rows across its u-span. 2–3 palm-crease
@@ -450,11 +494,15 @@ arcs. Per-fingertip nail ellipse (`(0.97,0.82,0.74)` → whiter tip + cuticle
 arc). Fingertip/palm-edge blush + pore speckle. Planar UV from rest bounds
 (`u=(x-xmin)/W`, `v=(y-ymin)/H`), static TCoords at build. `Mesh.texture(path)`
 applied; the actor colour goes white only when the texture loads --
-a missing/garbage texture keeps the SKIN colour (fallback).
+a missing/garbage texture keeps the SKIN colour (fallback). A `style=` variant
+swaps the palette and which marks are drawn from the same
+`STYLE_TEX` table (`handmesh.STYLE_TEX`); the `cartoon` entry reproduces the
+above byte-for-byte (checked by regenerating and diffing the PNG).
 
-**API**: `HandRig(mesh="tubes"|"skinned", texture_path=None)` default flips to
-`"skinned"` after acceptance; tubes stay as automatic fallback (try/except +
-one-line warning). CLI/GUI flags unchanged.
+**API**: `HandRig(mesh="tubes"|"skinned", texture_path=None, style=None)`
+default flips to `"skinned"` after acceptance; tubes stay as automatic fallback
+(try/except + one-line warning). `style` is the hand look (see "Hand styles,
+step 2"), default `cartoon`; CLI/GUI add `--hand-style` / `PIANOPLAYER_HAND_STYLE`.
 
 ## Conventions
 

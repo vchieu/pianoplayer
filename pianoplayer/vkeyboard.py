@@ -297,6 +297,11 @@ class VirtualKeyboard:
         self.shadows = bool(shadows)
         self.falling = os.environ.get("PIANOPLAYER_FALLING", "1") != "0"
         self._fall = None
+        # hand look (step 2): PIANOPLAYER_HAND_STYLE picks the skin style
+        # (cartoon | gloves | robot | skeleton); None = cartoon, the look
+        # that shipped.  --hand-style overrides it (see bin/pianoplayer).
+        self.hand_style = (os.environ.get("PIANOPLAYER_HAND_STYLE") or
+                           None)
         self.vp = None
         self.rightHand = None
         self.leftHand = None
@@ -816,7 +821,8 @@ class VirtualKeyboard:
     def build_RH(self, hand):
         """Attach a `pianoplayer.hand.Hand` (side='right') to the scene."""
         self.rightHand = hand
-        self.RH = HandRig(side="right", size=getattr(hand, "size", "M"))
+        self.RH = HandRig(side="right", size=getattr(hand, "size", "M"),
+                          style=getattr(self, "hand_style", None))
         self.RH.add_to(self.vp)
         self.vpRH = self.RH
         return self
@@ -824,7 +830,8 @@ class VirtualKeyboard:
     def build_LH(self, hand):
         """Attach a `pianoplayer.hand.Hand` (side='left') to the scene."""
         self.leftHand = hand
-        self.LH = HandRig(side="left", size=getattr(hand, "size", "M"))
+        self.LH = HandRig(side="left", size=getattr(hand, "size", "M"),
+                          style=getattr(self, "hand_style", None))
         self.LH.add_to(self.vp)
         self.vpLH = self.LH
         return self

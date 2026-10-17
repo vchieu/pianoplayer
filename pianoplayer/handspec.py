@@ -347,6 +347,109 @@ SKIN_DIFFUSE = 0.65
 SKIN_SPECULAR = 0.15
 SKIN_SHININESS = 24.0
 
+# --------------------------------------------------------------------------- #
+# Skins (step 2): idea-port of pygame-piano-animator `skins.py` styles onto
+# the 3D material / texture / vertex-colour layers.  NOT a line port: that
+# source draws 2D top-down polygons, here the same *looks* are expressed as
+# a texture variant + vertex-colour bands + material coefficients.
+#
+# `cartoon` is the shipped look and MUST stay pixel-identical: it reuses the
+# existing texture, SKIN colour, nail patch and material coefficients below
+# unchanged.  `gloves` / `robot` recolour + texture-variant; `skeleton` is
+# bones only (falls back to the tubes mesh with a dark colour).
+#
+# All look constants, EXCLUDED from geom_hash() like every other look knob:
+# a style never changes geometry, it only changes how the geometry is
+# painted (the cache filename carries the style instead).
+# --------------------------------------------------------------------------- #
+STYLE_ORDER = ("cartoon", "gloves", "robot", "skeleton")
+STYLE_DEFAULT = "cartoon"
+
+# material per style (ambient, diffuse, specular, shininess); cartoon is
+# literally the SKIN_* values above so the default look cannot drift.
+STYLE_MATERIAL = {
+    "cartoon": dict(ambient=SKIN_AMBIENT, diffuse=SKIN_DIFFUSE,
+                     specular=SKIN_SPECULAR, shininess=SKIN_SHININESS),
+    # white latex: a touch more ambient (it is bright), soft spec
+    "gloves": dict(ambient=0.52, diffuse=0.68, specular=0.22,
+                   shininess=30.0),
+    # painted shell plates: darker base response + a gloss highlight.
+    # 0.30/40 (not 0.48/64): a tighter, stronger highlight blew the white
+    # shell out to pure white on the whole dorsum and swallowed the dark
+    # joint rings + tip caps the style is made of.
+    "robot": dict(ambient=0.34, diffuse=0.62, specular=0.30,
+                  shininess=40.0),
+    # dark bones: mostly diffuse, barely any highlight
+    "skeleton": dict(ambient=0.42, diffuse=0.74, specular=0.08,
+                     shininess=16.0),
+}
+
+# vertex-colour palette per style: `base` (tubes + skinned fallback + the
+# actor colour used when no texture), `press` (tube press tint), `nail`
+# patch on the back of the distal segment + how far it is mixed in,
+# `press_mul` (skinned mesh: scalars multiply the texture, so this is a
+# multiply, not a colour) and the blob `shadow` colour.
+STYLE_COLORS = {
+    "cartoon": dict(base=(0.95, 0.80, 0.70), press=(0.96, 0.72, 0.64),
+                    nail=(0.97, 0.82, 0.74), nail_mix=0.6,
+                    press_mul=(1.00, 0.88, 0.90),
+                    shadow=(0.055, 0.035, 0.035)),
+    # gloves: white latex, no nails (the tip caps are the only dark patch),
+    # press reads as a slight grey squeeze
+    "gloves": dict(base=(0.97, 0.97, 0.97), press=(0.88, 0.88, 0.90),
+                   nail=(0.99, 0.99, 0.99), nail_mix=0.0,
+                   press_mul=(0.94, 0.94, 0.97),
+                   shadow=(0.05, 0.05, 0.06)),
+    # robot: light shell with dark fingertip caps (the "nail" patch is the
+    # cap, mixed in almost fully)
+    "robot": dict(base=(0.90, 0.90, 0.88), press=(0.80, 0.81, 0.84),
+                  nail=(0.21, 0.21, 0.23), nail_mix=0.85,
+                  press_mul=(0.90, 0.92, 0.95),
+                  shadow=(0.06, 0.06, 0.07)),
+    # skeleton: dark bones only (tubes mode; no texture, no nails)
+    "skeleton": dict(base=(0.11, 0.11, 0.13), press=(0.17, 0.17, 0.20),
+                     nail=(0.11, 0.11, 0.13), nail_mix=0.0,
+                     press_mul=(1.0, 1.0, 1.0),
+                     shadow=(0.03, 0.03, 0.035)),
+}
+
+# Vertex-colour bands painted onto the skinned mesh (they multiply the
+# texture, so they are dark).  All lengths in cm x hf, like the rest of the
+# geometry knobs.  Source mapping (skins.py):
+#   gloves cuff  -> `sleeve` puffy cuff across the wrist + thin dark arm
+#   robot joints  -> `joint` dark metal cylinders at MCP/PIP/DIP
+#   robot tips    -> `tip` dark caps over the last phalanx
+STYLE_BANDS = {
+    "gloves": dict(cuff_y=-1.4, cuff_h=1.3,        # dark forearm beyond this
+                   cuff_col=(0.10, 0.10, 0.12),
+                   puff_col=(0.93, 0.93, 0.94),   # puffy white cuff band
+                   puff_h=1.0),
+    "robot": dict(shell=(0.90, 0.90, 0.88),
+                  joint_col=(0.24, 0.25, 0.28),
+                  joint_r=0.42,                   # half-length of a ring
+                                                #   band along the bone
+                  joint_band_r=1.15,              # radial reach of a ring
+                  tip_col=(0.21, 0.21, 0.23),
+                  tip_r=0.95),                    # radius of the end cap
+}
+
+
+def normalize_style(style=None):
+    """Canonical style name (unknown/empty -> the default, 'cartoon')."""
+    s = str(style or "").strip().lower()
+    return s if s in STYLE_ORDER else STYLE_DEFAULT
+
+
+def style_look(style=None):
+    """Complete look dict for `style`: colors + material + vertex bands."""
+    s = normalize_style(style)
+    look = dict(STYLE_COLORS[s])
+    look["style"] = s
+    look.update(STYLE_MATERIAL[s])
+    look["bands"] = STYLE_BANDS.get(s, {})
+    # 'cartoon' must resolve to the module-level skin constants
+    return look
+
 # Cheap motion flavour (hand3d.update, all visual-only, IK stays exact):
 # wrist bounce on quick re-strikes, idle wander, sympathy dip, white-key
 # area ride and loudness (mean-press) wrist lift.
@@ -466,14 +569,16 @@ def geom_hash():
     NOTE: the hash covers GEOMETRY constants only. Fingering cost tables
     (MAX_SPAN, COMFORT_SPAN, CROSS_BASE, UNDER, BLACK_COST, WHITE_COST,
     THUMB_DOUBLE, PINKY_DOUBLE, INNER_ROOM_14) and look/motion constants
-    (TEX_*, SKIN_*, BOUNCE_*, WANDER_*, SYMPATHY_DIP, WHITE_RIDE, LOUD_LIFT)
-    are deliberately EXCLUDED: retuning them must not invalidate the mesh
-    cache. Geometry LOGIC changes (e.g. a rest_chains formula or coupling
-    edit) are invisible to it -- bump HANDMESH_VERSION manually with every
-    such change (v3 -> v4 above was exactly this case: the thumb formula
-    reuses unhashed THUMB_BASE_Y0 / THUMB_FWD inputs differently, and the
-    coupling change reuses the unchanged REST_DIP_RATIO value, so the hash
-    alone rebuilt nothing).
+    (TEX_*, SKIN_*, STYLE_*, BOUNCE_*, WANDER_*, SYMPATHY_DIP, WHITE_RIDE,
+    LOUD_LIFT) are deliberately EXCLUDED: retuning them must not invalidate
+    the mesh cache -- a hand *style* is painted, never re-meshed, so the
+    skin-style marker lives in the texture filename instead. Geometry LOGIC
+    changes (e.g. a rest_chains formula or coupling edit) are invisible to
+    it -- bump HANDMESH_VERSION manually with every such change (v3 -> v4
+    above was exactly this case: the thumb formula reuses unhashed
+    THUMB_BASE_Y0 / THUMB_FWD inputs differently, and the coupling change
+    reuses the unchanged REST_DIP_RATIO value, so the hash alone rebuilt
+    nothing).
     """
     rep = repr((FINGER_SPECS, FING_R_SCALE, FING_R_TAPER, MCP_SHRINK, ARM_PROFILE,
                 ARM_PIN, THENAR, HYPO, WEB_RADII, THUMB_CMC_A,
