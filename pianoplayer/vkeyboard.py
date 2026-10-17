@@ -43,7 +43,7 @@ except Exception:  # pragma: no cover
 from pianoplayer import __version__
 from pianoplayer.audio import SoundEngine, midi_from_name, midi_of
 from pianoplayer.falling import FALL_SECONDS, FallingNotes
-from pianoplayer.hand3d import FINGERS, HandRig
+FINGERS = (1, 2, 3, 4, 5)
 from pianoplayer.utils import (
     BLACK_KEY_PRESS_ANGLE,
     KEYBSIZE,
@@ -851,10 +851,9 @@ class VirtualKeyboard:
             self.RH = None              # the 2D overlay draws both hands
             self.vpRH = None
             return self
-        self.RH = HandRig(side="right", size=getattr(hand, "size", "M"),
-                          style=getattr(self, "hand_style", None))
-        self.RH.add_to(self.vp)
-        self.vpRH = self.RH
+        # 3D hand source removed (user only needs 2D)
+        self.RH = None
+        self.vpRH = None
         return self
 
     def build_LH(self, hand):
@@ -864,10 +863,9 @@ class VirtualKeyboard:
             self.LH = None              # the 2D overlay draws both hands
             self.vpLH = None
             return self
-        self.LH = HandRig(side="left", size=getattr(hand, "size", "M"),
-                          style=getattr(self, "hand_style", None))
-        self.LH.add_to(self.vp)
-        self.vpLH = self.LH
+        # 3D hand source removed (user only needs 2D)
+        self.LH = None
+        self.vpLH = None
         return self
 
     def _ensure_hands2d(self):
@@ -929,12 +927,9 @@ class VirtualKeyboard:
                                  ("L", "LH", getattr(self, "leftHand", None))):
             if hand is None:
                 continue
-            setattr(self, attr, HandRig(
-                side="right" if side == "R" else "left",
-                size=getattr(hand, "size", "M"),
-                style=getattr(self, "hand_style", None)))
-            getattr(self, attr).add_to(self.vp)
-            setattr(self, "vp" + attr, getattr(self, attr))
+            # 3D disabled; 2D overlay used instead
+            setattr(self, attr, None)
+            setattr(self, "vp" + attr, None)
         for p in self._players.values():
             p.rig = getattr(self, p.side + "H", None)
             if p.rig is not None and p.notes and p.notes[0].fx:

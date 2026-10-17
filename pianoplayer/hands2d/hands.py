@@ -2844,7 +2844,10 @@ class HandAnimator:
         self._ensure_layout(kb)
         g, ep = self._gliss_w(t)
         if g >= 1.0:
-            return self._gliss_pose(t, ep, kb, g)
+            p = self._gliss_pose(t, ep, kb, g)
+            p["anim"] = self
+            p["skin"] = self.skin
+            return p
         fp = self._finger_pose(t, kb)
         target = self._gliss_across(t, kb)
         if target is None:
@@ -2857,7 +2860,7 @@ class HandAnimator:
         if target is not None:
             px, py = self._pose_wrist(p)
             p = _shift_pose(p, target[0] - px, target[1] - py, self.mirror)
-        return dict(p, anim=self)
+        return dict(p, anim=self, skin=self.skin)
 
     def footprint(self, t):
         """

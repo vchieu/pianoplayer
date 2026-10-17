@@ -241,7 +241,7 @@ class Hands2D:
         # an unknown --hand-style name falls back to the 2D default skin
         # instead of breaking the drawing (skins.normalize keeps its palette)
         self.pianist = pianists.Pianist("Default", pianists.DEFAULT_ID,
-                                        skin=skins.normalize({"style": style, "outline": 0.0, "shadow": False}))
+                                        skin=skins.normalize({"style": style}))
         self.anims = {}
         for side in (midi_loader.RIGHT, midi_loader.LEFT):
             mine = [n for n in self.song.notes if n.hand == side]

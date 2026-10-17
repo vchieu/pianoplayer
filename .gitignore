@@ -1,20 +1,10 @@
-*.[oa]
-*~
-*.pyc
-__pycache__/
-*.egg-info/
-build/
-dist/
-output.xml
-
-# rendered test artefacts
-test_audio_out/
-test_hand_render/
-test_play_out/
-test_player2d_out/
-test_shadow_out.png
+# Test / build artifacts (not source)
+test_*_out/
+diag_*_out/
 hand_look_out/
-PIANOPLAYER_*.md
-diag_handmesh_out/
-docs/ref_*
-docs/sample-*
+__pycache__/
+*.pyc
+*.pyo
+
+# Bug / temporary images not part of source
+docs/finger_bug*.PNG

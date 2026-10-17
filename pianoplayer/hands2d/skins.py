@@ -937,16 +937,16 @@ def draw_skinned(surf, items):
     for layer in sorted({h.layer for h in hands}):
         group = [h for h in hands if h.layer == layer]
         if any(h.skin["shadow"] for h in group):
-            sh = _shadow_surface(surf.get_size())
-            spen = _Pen(sh)
+            clip = surf.get_clip() or surf.get_rect()
+            sh = _shadow_surface(clip.size)
+            spen = _Pen(sh, origin=clip.topleft)
             for h in group:
                 if h.skin["shadow"]:
                     was = h.hide_thumb
                     h.hide_thumb = was or h.tuck is not None    # (in the hand's own shadow)
                     h.shadow(spen, (0, 0, 0, 70))
                     h.hide_thumb = was
-            clip = surf.get_clip()
-            surf.blit(sh, (0, 0))
+            surf.blit(sh, clip.topleft)
             surf.set_clip(clip)
         for h in sorted(group, key=lambda h: h.palm_z):
             if h.tuck is not None:
@@ -964,8 +964,9 @@ def draw_webs(surf, items):
     if not items:
         return
     geo_skin = normalize({"style": "cartoon"})
-    sh = _shadow_surface(surf.get_size())
-    pen = _Pen(sh)
+    clip = surf.get_clip() or surf.get_rect()
+    sh = _shadow_surface(clip.size)
+    pen = _Pen(sh, origin=clip.topleft)
     for st, pr, ppi, color in items:
         try:
             h = _Hand(st, pr, ppi, geo_skin)
@@ -979,8 +980,7 @@ def draw_webs(surf, items):
         pen.poly(h.web, c + (48,))
         for p_, q in zip(h.web_edge, h.web_edge[1:]):
             pen.line(p_, q, c + (130,), max(1.0, 0.018 * ppi))
-    clip = surf.get_clip()
-    surf.blit(sh, (0, 0))
+    surf.blit(sh, clip.topleft)
     surf.set_clip(clip)
 
 
