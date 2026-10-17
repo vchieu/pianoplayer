@@ -253,6 +253,8 @@ class _Player:
         self.fire = 0               # next note to be pressed
         self.aim = 0                # note the hand is heading towards
         self.aim_fingers = set()    # R1.8: fingers of imminent notes
+        self.strike_in = {}         # motion step 1: finger -> s until its
+                                    # next unfired strike (anticipation)
         self.sched = 0              # next note to be handed to the synth
         self.held = []              # fired notes still sounding
         self.press = {f: 0.0 for f in FINGERS}
@@ -1247,6 +1249,20 @@ class VirtualKeyboard:
         # R1.8: every finger striking within AIM_LEAD aims exactly at its
         # key (no drift toward the relaxed slot before the press).
         p.aim_fingers = _aim_fingers(notes, now, start=p.fire)
+        # Motion step 1 (1a anticipation): seconds until each finger's next
+        # unfired strike, so the rig can phase hover->PREP->strike.  Only
+        # future strikes count (past-due notes strike now: 0.0).
+        lead = {}
+        if p.aim_fingers:
+            for i in range(p.fire, len(notes)):
+                e = notes[i]
+                if e.fired or not e.finger or e.finger in lead:
+                    continue
+                if e.finger in p.aim_fingers:
+                    lead[e.finger] = max(0.0, e.t_on - now)
+                    if len(lead) >= len(p.aim_fingers):
+                        break
+        p.strike_in = lead
 
         # is a black key coming up soon? -------------------------------------
         advance = bool(target is not None and target.black
@@ -1383,7 +1399,8 @@ class VirtualKeyboard:
 
             p.rig.update(dt, p.finger_x, p.press, advance_black=advance,
                          held={f for f in FINGERS if p.active.get(f)},
-                         aim_fingers=p.aim_fingers)
+                         aim_fingers=p.aim_fingers,
+                         strike_in=p.strike_in)
 
         self._sync_keys(dt)
         fall = getattr(self, "_fall", None)

@@ -358,6 +358,107 @@ SYMPATHY_DIP = 0.10     # cm idle neighbour dips per adjacent press
 WHITE_RIDE = 0.15       # cm idle fingers ride higher over black-key areas
 LOUD_LIFT = 0.12        # cm root-z lift per mean press (effort)
 
+# --------------------------------------------------------------------------- #
+# Motion step 1 (ported from pygame-piano-animator hands.py + pianist.py
+# BEHAVIORS at their defaults; idea-port, not line-port: the 2D solver works
+# in pixels/top-down with a Gauss-Newton wrist fit, the 3D rig drives a root
+# spring + yaw/pitch + per-finger IK targets instead).
+# Units are adapted: inches/model-units -> cm x hf (rest offsets scale like
+# hand3d._REST_REF_HF).  All visual-only: IK targets stay reachable.
+# Deliberately EXCLUDED from geom_hash() (see it): retuning motion must not
+# invalidate the mesh cache.
+# --------------------------------------------------------------------------- #
+# 1a -- anticipation / strike timeline (hands STRIKE_T/RELEASE_T/LINGER_T/
+# RETURN_T/PRESS_T, pianist finger_lead(0.5) = 0.9 s head start, 0.6 travel
+# share).  AIM_LEAD (vkeyboard, 0.25 s) is the short end of that head start:
+# the pump only knows imminent notes, so PREP_LEAD_T caps how early a finger
+# rises to its striking height.
+STRIKE_T = 0.12        # s final drop onto the key (cut short when time is
+                       # short; quadratic ease, like _tip_target's s*s)
+RELEASE_T = 0.12       # s fingertip lift after the release (the 2D pose
+                       # eases the lift; here it is a one-pole rise, RISE_TAU)
+LINGER_T = 0.06        # s a released finger stays over its key ...
+RETURN_T = 0.35        # s ... then drifts back to its resting spot
+RISE_TAU = 0.045       # s one-pole the tip rises toward a NEW target (the
+                       # release lift / the hover->PREP raise, hands
+                       # RELEASE_T ~3 tau).  Only a rising target is
+                       # smoothed: a descending one (the strike drop, the key
+                       # going down) is taken exactly, so contact timing and
+                       # tip_err never lag.
+PREP_LEAD_T = 0.9      # s longest head start (finger_lead(0.5)); beyond it
+                       # the finger keeps its idle height
+PREP_ADD = {1: 0.45, 2: 1.30, 3: 1.30, 4: 1.30, 5: 1.10}  # cm x hf above
+                       # HOVER when raised, ready to strike (hands PREP-HOVER
+                       # in model units x ~1.09 cm/unit)
+# 1b -- wrist fit, joint limits first (hands WRIST_DEV_DEG/YAW_PRIOR,
+# SPLAY_LIMIT_DEG/SPLAY_COMFORT_DEG, REACH_MIN/REACH_COMFORT, CROSS_TURN_DEG).
+# The hand turns at the wrist first (fast tau: turn leads) and slides second
+# (root spring): yaw anticipation is clamped to the wrist's deviation range.
+WRIST_DEV_DEG = (-26.0, 8.0)  # wrist deviation range about the forearm's
+                              # natural turn (hands.py, clockwise positive
+                              # toward the little finger there)
+YAW_PRIOR = 0.25       # how strongly the hand prefers the forearm's natural
+                       # turn (hands _fit_hand prior; here: the shoulder-arm
+                       # yaw in hand3d.update plays this role)
+YAW_SPLAY_GAIN = 0.05  # rad of anticipation yaw per cm the root still has to
+                       # travel (turn-before-slide; 0 at settle, reach-safe).
+                       # 0.02 rad/cm read as 1 deg on a 12 cm jump (invisible);
+                       # 0.05 gives ~3.5 deg there and hits the WRIST_DEV_DEG
+                       # clamp (-26 deg) past ~9 cm of travel, so a big shift
+                       # visibly turns before it slides.
+YAW_SPLAY_TAU = 0.04   # s smoothing of that yaw (faster than the root TAU
+                       # 0.065, so the turn visibly leads the slide)
+SPLAY_LIMIT_DEG = {1: (-85, 34), 2: (-36, 14), 3: (-26, 26), 4: (-22, 24),
+                   5: (-12, 55)}     # full stretch (hands.py, held/struck keys)
+SPLAY_COMFORT_DEG = {1: (-64, 34), 2: (-24, 10), 3: (-18, 18), 4: (-15, 16),
+                     5: (-8, 24)}    # comfortable spread in the air
+REACH_MIN = {1: 0.55, 2: 0.32, 3: 0.32, 4: 0.32, 5: 0.36}  # min knuckle->tip
+REACH_COMFORT = {1: 0.97, 2: 0.98, 3: 0.98, 4: 0.98, 5: 0.98}  # ... as a
+                       # share of the finger's length (a playing finger is
+                       # long, gently arched)
+CROSS_TURN_DEG = 14.0  # extra turn toward the little finger while the thumb
+                       # crosses under (hands CROSS_TURN_DEG; folded into the
+                       # yaw-anticipation clamp, not a separate state)
+# 1c -- tendon link + idle fan + gestures (hands TENDON_FOLLOWERS/
+# TENDON_FLOOR_IN/SHAPE_FALLOFF/RUN_*/TREM_*/GESTURE_REPEAT_T/BOUNCE_MAX_IN,
+# pianist tendon_link 0.6 / wrist_bounce 0.5 / tremolo_rotation 0.5).
+TENDON_FOLLOWERS = {3: (4,), 4: (3,), 5: (3, 4)}  # a curving leader takes
+                       # these with it (middle<->ring both ways, little takes
+                       # both) -- the thumb/index stay independent
+TENDON_LINK = 0.6      # pianist default: share of the leader's depth passed on
+TENDON_FLOOR = 0.38    # cm above the key tops a follower never goes below
+                       # (TENDON_FLOOR_IN 0.15 in)
+SHAPE_FALLOFF = 0.6    # idle fingers follow a busy neighbour by this much
+                       # per finger of distance (hands._shaped_rests)
+SHAPE_CAP_X = 2.1      # cm x hf cap on the shaped-rest x displacement
+SHAPE_CAP_Y = 1.2      # ... and y (hands 0.9/0.5 white-key caps in inches)
+                       # -- reference only, NOT wired: the y cap needs a
+                       # shaped-rest y, which this rig has no slot for (the
+                       # idle _REST_PULL_Y/_IDLE_FWD own the y). Do not
+                       # fake-wire it (same rule as REST_MCP_DEG).
+SHAPE_RAMP = (0.15, 0.6)  # cm x hf: a busy finger's pull ramps in over this
+                       # |displacement| range -- inside a comfortable grip
+                       # the natural slots already fan correctly (and the
+                       # silhouette stays put for the look test); a
+                       # stretched grip (octaves, wide chords) fans fully
+RUN_GLIDE_TAU = 0.12   # s root smoothing inside a scale run.  hands
+                       # RUN_GLIDE_T = 0.25 s is a +-window the wrist is
+                       # *averaged* over (a ~0.5 s box, one-pole equivalent
+                       # ~0.11 s); a literal 0.25 s tau made the wrist trail a
+                       # 19 cm/s run by ~4.8 cm and dragged held fingertips
+                       # off their keys (0.4 cm tip_err in a legato probe)
+RUN_RAMP_T = 0.15      # s a run's hold eases in/out over
+TREM_GAP_T = 0.3       # s alternations quicker than this rotate the forearm
+TREM_ROLL_MAX = 0.07   # rad forearm rock in a tremolo (~4 deg: the 2D
+                       # ROLL_MAX 40 deg at 50% reads as top-down swing and
+                       # does not map 1-1 onto 3D roll; IK stays exact)
+TREM_MIN_NOTES = 4     # alternating onsets needed before the roll engages
+BOUNCE_REPEAT_T = 0.45  # s repeated chords closer than this bounce (hands
+                       # GESTURE_REPEAT_T; the in-rig re-strike window stays
+                       # 0.25 s) -- reference only, NOT wired: the bounce is
+                       # not scaled with chord size (the rig has no chord-size
+                       # signal); kept so the port stays traceable
+
 
 def geom_hash():
     """8-char sha1 over geometry + SDF constants + grid + version (R1.4).

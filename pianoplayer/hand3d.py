@@ -585,12 +585,10 @@ class HandRig:
     PITCH_VEL_MAX = math.radians(2.0) # max velocity-induced pitch
     PITCH_TAU = 0.08                  # pitch smoothing time constant [s]
     
-    # R5.6: tendon linking - adjacent finger lift when one presses
-    TENDON_LIFT_MAX = 0.20            # max lift for adjacent fingers [cm]
-    TENDON_LIFT_RING = 0.20           # ring finger lift (more)
-    TENDON_LIFT_OTHER = 0.10          # index/middle/pinky lift (less)
-    TENDON_PRESS_THRESH = 0.5         # press threshold to trigger
-    TENDON_TAU = 0.04                 # tendon lift smoothing [s]
+    # Motion step 1 (handspec knobs): linked tendons pull followers down
+    # (source-faithful, hands._tendon_pull), wrist turn leads the slide,
+    # idle fan + linger/return, tremolo roll, run glide.  See update().
+    TENDON_TAU = 0.04                 # follower-depth smoothing [s]
 
     def __init__(self, side="right", size="M", skin=SKIN, kb_center=None,
                  mesh="skinned", texture_path=None):
@@ -642,8 +640,15 @@ class HandRig:
         # R5.5: pitch state
         self._pitch = self.PITCH
         self._pitch_target = self.PITCH
-        # R5.6: tendon lift state per finger
-        self._tendon_lift = {f: 0.0 for f in FINGERS}
+        # Motion step 1 state (all visual-only; zero at settle/reset):
+        self._tendon_pull = {f: 0.0 for f in FINGERS}  # follower drag [cm]
+        self._tip_z = {}                 # last smoothed tip height (rise ease)
+        self._free_since = {f: -1e9 for f in FINGERS}  # last press->release
+        self._yaw_splay = 0.0        # anticipation yaw (turn-before-slide)
+        self._run_w = 0.0            # scale-run glide weight 0..1
+        self._run_hist = []          # [(t, mean aim x)] recent aim frames
+        self._trem_hist = []         # [(t, side)] recent press onsets
+        self._trem_roll = 0.0        # tremolo forearm rock [rad]
         # Figure-lite motion flavour (visual only): wrist bounce on quick
         # re-strikes + last-release clock per finger.
         self._bounce = 0.0
@@ -1386,7 +1391,8 @@ class HandRig:
             pass
 
     def update(self, dt, finger_x, press=None, advance_black=None,
-                 aim_finger=None, held=None, aim_fingers=None):
+                 aim_finger=None, held=None, aim_fingers=None,
+                 strike_in=None, roll=0.0):
         """
         Re-pose the whole hand.
 
@@ -1426,6 +1432,18 @@ class HandRig:
             natural slot.  The guard keys off `held`, never off the press
             amount, so a held finger targets its key exactly even in early
             frames when press is still ~ 0.
+        strike_in : None | dict
+            motion step 1: seconds until each aiming finger's next strike
+            (`t_on - now`, from vkeyboard._pump; None/missing = unknown).
+            With it the aiming finger rises to its PREP height early
+            (hover->PREP) and makes the final drop inside STRIKE_T with a
+            quadratic ease; without it the legacy binary hover applies.
+            Backward-compat: omitted entirely by old callers/tests.
+        roll : float
+            motion step 1: extra forearm roll [rad] added to the tremolo
+            rock (caller-driven; the internal alternation detector feeds
+            `_trem_roll` on its own).  Defaults to 0.0: old callers behave
+            exactly as before.
         """
         dt = float(min(max(dt, 1e-4), 0.1))
         press = press or {}
@@ -1440,6 +1458,20 @@ class HandRig:
                 aim_set |= set(_aim)
             except TypeError:
                 aim_set.add(_aim)
+        # Motion step 1: per-finger time to strike (seconds; garbage -> NaN
+        # entries are dropped so a bad caller cannot freeze a finger up).
+        lead = {}
+        if strike_in:
+            try:
+                for _f, _v in dict(strike_in).items():
+                    try:
+                        _v = float(_v)
+                    except (TypeError, ValueError):
+                        continue
+                    if _v == _v and int(_f) in FINGERS:
+                        lead[int(_f)] = _v
+            except (TypeError, ValueError, AttributeError):
+                pass
 
         # ---- fingertip targets ----------------------------------------
         targets = {}
@@ -1484,6 +1516,60 @@ class HandRig:
         # H1.2: natural (parallel) slots from the root at frame start --
         # the root spring below moves afterwards, so this cannot feed back.
         natural = self._neutral_x()
+        # Motion step 1 (1c idle fan, hands._shaped_rests): idle fingers fan
+        # out between their busy neighbours -- a busy finger's displacement
+        # from its natural slot spreads with SHAPE_FALLOFF per finger of
+        # distance, capped at SHAPE_CAP_X.  The root spring below chases the
+        # pre-lerp fan (fan_xs), so shaping never moves the root or a
+        # pressed/aiming/held finger: reach cells are untouched.
+        _busy = {g for g in FINGERS
+                 if g in raw_x and (g in held or g in aim_set
+                                    or float(press.get(g, 0.0)) > 0.5)}
+        _band = 0.5 * KEY_WB
+        _rlo, _rhi = (_HS.SHAPE_RAMP[0] * rs0, _HS.SHAPE_RAMP[1] * rs0)
+        _disp = {}
+        for g in _busy:
+            _w = 1.0
+            if g == 1:
+                # a thumb tucked under says nothing about the others: fade
+                # its pull out as it passes the index slot (source: fade
+                # over half a key, not a switch, or idle fingers jump).
+                _w = float(_smoothstep(0.0, 1.0,
+                                       0.5 + (natural[2] - raw_x[1]) / _band))
+            # ... and a busy finger inside a comfortable grip pulls nothing:
+            # the natural slots already fan correctly there (keeps compact
+            # scales/look poses put); a stretched grip fans fully.
+            _w *= float(_smoothstep(_rlo, _rhi, abs(raw_x[g] - natural[g])))
+            if _w > 1e-3:
+                _disp[g] = (raw_x[g] - natural[g]) * _w
+        if 1 in _disp:
+            # ... and while the thumb is across, the others stop listening
+            # to busy neighbours on its far side (same fade, mirrored).
+            for g in list(_disp):
+                if g != 1:
+                    _fade = float(_smoothstep(
+                        0.0, 1.0, 0.5 + (raw_x[1] - natural[g]) / _band))
+                    if _fade >= 1.0:
+                        _disp.pop(g, None)
+                    elif _fade > 0.0:
+                        _disp[g] *= 1.0 - _fade
+        _capx = _HS.SHAPE_CAP_X * rs0
+        shaped_rest = {}
+        for f in FINGERS:
+            if f in _busy or f not in raw_x:
+                continue
+            _lo = max((g for g in _disp if g < f), default=None)
+            _hi = min((g for g in _disp if g > f), default=None)
+            if _lo is not None and _hi is not None:
+                _s = (f - _lo) / (_hi - _lo)
+                _dx = _disp[_lo] * (1.0 - _s) + _disp[_hi] * _s
+            elif _lo is not None or _hi is not None:
+                _g = _lo if _lo is not None else _hi
+                _dx = _disp[_g] * (_HS.SHAPE_FALLOFF ** abs(f - _g))
+            else:
+                _dx = 0.0
+            shaped_rest[f] = (natural[f]
+                              + max(-_capx, min(_capx, _dx)))
         for f in FINGERS:
             x = raw_x.get(f)
             if x is None:
@@ -1511,10 +1597,20 @@ class HandRig:
                 # pushed finger (v5 coincidence guard above) keeps its
                 # stepped-aside x: lerping it here would drag it straight
                 # back onto the occupied key it just left.
-                x = ((1.0 - _IDLE_NATURAL_LERP) * float(x)
-                     + _IDLE_NATURAL_LERP * natural[f])
+                # Motion step 1 (1a linger + 1c fan): the slot is the
+                # neighbour-shaped rest, gated by the release envelope --
+                # a released finger stays over its key for LINGER_T, then
+                # drifts back over RETURN_T (hands RELEASE_T/LINGER_T/
+                # RETURN_T).  Never-pressed fingers (free_since -1e9) get
+                # s_ret = 1: legacy behaviour exactly.
+                age = self._t - float(self._free_since.get(f, -1e9))
+                s_ret = float(_smoothstep(_HS.LINGER_T,
+                                          _HS.LINGER_T + _HS.RETURN_T, age))
+                leff = _IDLE_NATURAL_LERP * s_ret
+                x = ((1.0 - leff) * float(x)
+                     + leff * shaped_rest.get(f, natural[f]))
                 if f == 1:
-                    x -= self.s * _THUMB_SPLAY * self.hf
+                    x -= self.s * _THUMB_SPLAY * self.hf * s_ret
             black = key_is_black(x)
             name = FINGER_NAMES[f]
             y = CONTACT_Y_BLACK[name] if black else CONTACT_Y_WHITE[name]
@@ -1528,9 +1624,24 @@ class HandRig:
             pressed_z = top - key_drop(x, y, a) + self.KEY_SINK
             rs = self.hf / _REST_REF_HF
             if f in aim_set and rest > 0.0:
-                # D5: the finger about to strike lowers early.
-                z = (top + self.HOVER) * rest + pressed_z * a
+                # Motion step 1 (1a anticipation, hands._tip_target): with
+                # time-to-strike known the finger waits at its raised PREP
+                # height, then makes the final drop inside STRIKE_T with a
+                # quadratic ease (s*s).  Without it, the legacy binary
+                # hover below applies.
                 yy = y
+                dt_s = lead.get(f)
+                if dt_s is not None and 0.0 <= dt_s <= _HS.PREP_LEAD_T:
+                    prep_z = top + self.HOVER + _HS.PREP_ADD[f] * rs
+                    if dt_s >= _HS.STRIKE_T:
+                        z_aim = prep_z
+                    else:
+                        s = dt_s / _HS.STRIKE_T
+                        z_aim = pressed_z + (prep_z - pressed_z) * s * s
+                    z = z_aim * rest + pressed_z * a
+                else:
+                    # D5: the finger about to strike lowers early.
+                    z = (top + self.HOVER) * rest + pressed_z * a
             elif rest > 0.0:
                 # D5: idle fingers curl at their per-finger rest height and
                 # breathe; everything scales with `rest` so a fully pressed
@@ -1546,7 +1657,19 @@ class HandRig:
             else:
                 z = pressed_z
                 yy = y
-            targets[f] = (float(x), yy, z + lift.get(f, 0.0), a)
+            # Motion step 1 (1a release lift / hover->PREP raise): the tip
+            # eases UP to a new height over RISE_TAU (~hands RELEASE_T), but
+            # a descending target -- the strike drop, the key going down --
+            # is taken exactly, so contact timing and tip_err never lag.
+            zt = z + lift.get(f, 0.0)
+            _pz = self._tip_z.get(f)
+            if _pz is None or zt <= _pz or f in held or a >= 0.999:
+                self._tip_z[f] = zt
+                z = zt
+            else:
+                z = _pz + (zt - _pz) * (1.0 - math.exp(-dt / _HS.RISE_TAU))
+                self._tip_z[f] = z
+            targets[f] = (float(x), yy, z, a)
             black_pressed = black_pressed or (black and a > 0.004)
         self._targets_x = {f: t[0] for f, t in targets.items()}
         
@@ -1555,19 +1678,55 @@ class HandRig:
             black_pressed or bool(advance_black))
 
         # ---- motion flavour (visual only, IK targets stay reachable) ----
-        # wrist bounce: a quick re-strike (release -> press within 0.25 s)
-        # kicks the wrist up briefly, like a repeated-chord bounce.
+        # Wrist bounce (hands._gesture_at/_bounce_one): a quick re-strike
+        # (release -> press inside the re-strike window) kicks the wrist up
+        # briefly, like a repeated-chord bounce.
+        # Rising edges also feed the tremolo detector (side -1 low fingers,
+        # +1 high fingers) and falling edges stamp _free_since (linger).
         for f in FINGERS:
             a_now = float(press.get(f, 0.0))
             a_prev = float(self._prev_press.get(f, 0.0))
             if a_now < 0.5:
                 self._last_release[f] = self._t
-            elif a_prev < 0.5 and (self._t - self._last_release[f]) < 0.25:
-                self._bounce = 1.0
+                if a_prev >= 0.5:
+                    self._free_since[f] = self._t
+            elif a_prev < 0.5:
+                if (self._t - self._last_release[f]) < 0.25:
+                    self._bounce = 1.0
+                _side = -1.0 if f in (1, 2) else (1.0 if f in (4, 5) else 0.0)
+                if _side:
+                    self._trem_hist.append((self._t, _side))
             self._prev_press[f] = a_now
         self._bounce *= math.exp(-dt / _HS.BOUNCE_TAU)
+        # Tremolo roll (hands TREM_*: alternations quicker than TREM_GAP_T
+        # rotate the forearm, the striking side going down each time): the
+        # rock eases in over TREM_MIN_NOTES alternating onsets and out when
+        # they stop.  Amplitude is small on purpose (see TREM_ROLL_MAX).
+        self._trem_hist = [(t, s) for (t, s) in self._trem_hist
+                           if self._t - t < 1.0]
+        _trem_tgt = 0.0
+        _hh = self._trem_hist[-6:]
+        if len(_hh) >= _HS.TREM_MIN_NOTES:
+            _alt = all(_hh[i][1] == -_hh[i - 1][1] for i in range(1, len(_hh)))
+            _quick = all(_hh[i][0] - _hh[i - 1][0] < _HS.TREM_GAP_T
+                         for i in range(1, len(_hh)))
+            if _alt and _quick:
+                _trem_tgt = _hh[-1][1] * _HS.TREM_ROLL_MAX
+        self._trem_roll += (_trem_tgt - self._trem_roll) * (
+            1.0 - math.exp(-dt / 0.05))
         # idle fingers: wander + sympathy dip with pressing neighbours +
-        # white-key-area ride (fingers among black keys sit higher).
+        # white-key-area ride (fingers among black keys sit higher) +
+        # tendon pull (hands._tendon_pull, below).
+        _down = {}
+        for _lead_f, _fols in _HS.TENDON_FOLLOWERS.items():
+            _t = targets.get(_lead_f)
+            if _t is None:
+                continue
+            _d = min(1.0, max(0.0, float(_t[3])))
+            if _d > 0.0:
+                for _fol in _fols:
+                    _down[_fol] = max(_down.get(_fol, 0.0), _d)
+        _floor = _HS.TENDON_FLOOR * rs0
         for f in list(targets.keys()):
             a_f = float(press.get(f, 0.0))
             if f in held or f in aim_set or a_f > 0.5:
@@ -1580,6 +1739,20 @@ class HandRig:
                 [float(press.get(g, 0.0))
                  for g in (f - 1, f + 1) if 1 <= g <= 5] + [0.0])
             z = z - dip + (_HS.WHITE_RIDE if any_black else 0.0)
+            # Linked tendons: a curving leader takes its followers some of
+            # the way down with it (unless they reach for a key of their
+            # own -- idle-only here), never below the floor.  The deepest
+            # leader counts.  Smoothed like the other flavour states.
+            _pull = _down.get(f, 0.0)
+            if _pull > 0.0 and f not in lift:
+                _tgt_pull = (_HS.TENDON_LINK * _pull
+                             * max(0.0, z - _floor))
+                _k = 1.0 - math.exp(-dt / self.TENDON_TAU)
+                self._tendon_pull[f] += (_tgt_pull
+                                         - self._tendon_pull[f]) * _k
+            else:
+                self._tendon_pull[f] *= math.exp(-dt / self.TENDON_TAU)
+            z -= self._tendon_pull[f]
             targets[f] = (x, y, z, a)
         # ---- R5.5: wrist pitch on black keys & from velocity ----
         # Base pitch: PITCH (default -5°), add PITCH_BLACK (+3°) when any black key pressed
@@ -1592,30 +1765,35 @@ class HandRig:
         # Smooth pitch
         k_pitch = 1.0 - math.exp(-dt / self.PITCH_TAU)
         self._pitch += (self._pitch_target - self._pitch) * k_pitch
-        
-        # ---- R5.6: tendon linking - adjacent finger lift when one presses ----
-        # For each finger pressing > threshold, lift adjacent fingers slightly
-        # Ring finger lifts more (0.2 cm) than others (0.1 cm)
-        # Held fingers (press > 0.5 and in held) are unaffected
-        new_tendon_lift = {f: 0.0 for f in FINGERS}
-        for f in FINGERS:
-            press_amt = float(press.get(f, 0.0))
-            if press_amt > self.TENDON_PRESS_THRESH and f not in held:
-                # This finger is pressing but not held (active press)
-                # Lift adjacent fingers
-                for adj in (f-1, f+1):
-                    if 1 <= adj <= 5 and adj not in held:
-                        press_adj = float(press.get(adj, 0.0))
-                        if press_adj <= self.TENDON_PRESS_THRESH:
-                            # Adjacent finger is not pressing much - lift it
-                            lift_amt = (self.TENDON_LIFT_RING if adj == 4 
-                                        else self.TENDON_LIFT_OTHER)
-                            new_tendon_lift[adj] = max(new_tendon_lift[adj], lift_amt)
-        # Smooth tendon lifts
-        for f in FINGERS:
-            k_tendon = 1.0 - math.exp(-dt / self.TENDON_TAU)
-            self._tendon_lift[f] += (new_tendon_lift[f] - self._tendon_lift[f]) * k_tendon
-        
+
+        # ---- motion step 1: scale-run glide (hands RUN_GLIDE_T) ----
+        # When the aim mean steps monotonically in one direction frame after
+        # frame (a scale run crossing under/over), the wrist glides: the
+        # root spring eases toward RUN_GLIDE_TAU and the fingers do the
+        # crossing.  Eases in/out over RUN_RAMP_T.  No aim movement (settle,
+        # tests) leaves TAU exactly as before.
+        if aim_set:
+            _aim_xs = [fan_xs[f] for f in aim_set if f in fan_xs]
+            if _aim_xs:
+                _am = float(np.mean(_aim_xs))
+                if not (self._run_hist and self._run_hist[-1][1] == _am):
+                    self._run_hist.append((self._t, _am))
+                    self._run_hist = self._run_hist[-8:]
+        _run_steps = 0
+        _hh2 = self._run_hist
+        if len(_hh2) >= 4:
+            _ds = [_hh2[i][1] - _hh2[i - 1][1] for i in range(1, len(_hh2))]
+            _dt_ok = all(_hh2[i][0] - _hh2[i - 1][0] < 0.5
+                         for i in range(1, len(_hh2)))
+            if _dt_ok and all(_d > 0.05 for _d in _ds[-3:]):
+                _run_steps = 1
+            elif _dt_ok and all(_d < -0.05 for _d in _ds[-3:]):
+                _run_steps = 1
+        _run_tgt = 1.0 if _run_steps else 0.0
+        self._run_w += (_run_tgt - self._run_w) * (
+            1.0 - math.exp(-dt / _HS.RUN_RAMP_T))
+        _tau_eff = (self.TAU + self._run_w * (_HS.RUN_GLIDE_TAU - self.TAU))
+
         # ---- root: spring toward the mean of the (pre-lerp) targets --
         xs = [fan_xs[f] for f in targets] if fan_xs else []
         rx_t = float(np.mean(xs)) if xs else float(self.root[0])
@@ -1650,7 +1828,7 @@ class HandRig:
                     and float(self.tip_err.get(f, 0.0)) > 0.3)
             rx_t = (1.0 - pull) * rx_t + pull * sxx / max(n, 1)
             ry_t = (1.0 - pull) * ry_t + pull * syy / max(n, 1)
-        alpha = 1.0 - math.exp(-dt / (_CHASE_TAU if chase else self.TAU))
+        alpha = 1.0 - math.exp(-dt / (_CHASE_TAU if chase else _tau_eff))
         prev_x = float(self.root[0])
         self.root[0] += (rx_t - self.root[0]) * alpha
         self.root[1] += (ry_t - self.root[1]) * alpha
@@ -1666,15 +1844,34 @@ class HandRig:
                         min(self.YAW_MAX, -self.YAW_GAIN * self._vx))
         # D3: the forearm yaws around the wrist toward the elbow side, more
         # so near the ends of the keyboard; the velocity yaw adds on top.
+        # Motion step 1 (1b turn-before-slide, hands WRIST_DEV_DEG/YAW_PRIOR
+        # + _solve_hand): an out-of-range hand turns at the wrist first and
+        # slides second.  The anticipation yaw leans toward where the root
+        # still has to travel, clamped to the wrist's deviation range, and
+        # is smoothed FASTER than the root spring (YAW_SPLAY_TAU < TAU), so
+        # the turn visibly leads the slide.  It is exactly 0 at settle (no
+        # travel left), hence reach-neutral; the shoulder-arm yaw above
+        # plays the source YAW_PRIOR role (prefer the forearm's line).
         shoulder_x = self.kb_center + self.s * _SHOULDER_OFF
         yaw_arm = (math.atan2(float(self.root[0]) - shoulder_x,
                               _YAW_ARM_LEN) * _YAW_ARM_GAIN)
         yaw_arm = max(-_YAW_ARM_MAX, min(_YAW_ARM_MAX, yaw_arm))
-        yaw_t = yaw_arm + yaw_vel
+        _dev_lo = math.radians(_HS.WRIST_DEV_DEG[0])
+        _dev_hi = math.radians(_HS.WRIST_DEV_DEG[1])
+        _splay_tgt = max(_dev_lo, min(_dev_hi,
+                                      -_HS.YAW_SPLAY_GAIN
+                                      * (rx_t - float(self.root[0]))))
+        self._yaw_splay += ((_splay_tgt - self._yaw_splay)
+                            * (1.0 - math.exp(-dt / _HS.YAW_SPLAY_TAU)))
+        yaw_t = yaw_arm + yaw_vel + self._yaw_splay
         self.yaw += (yaw_t - self.yaw) * (1.0 - math.exp(-dt / 0.12))
 
         # ---- hand orientation -----------------------------------------
-        R = _rot_z(self.yaw) @ _rot_y(-self.s * self.ROLL) @ _rot_x(self._pitch)
+        # ... the tremolo rock and the caller roll ride on the forearm roll
+        # (visual-only, IK targets stay exact; both are 0 at settle).
+        _roll_eff = (self.ROLL + self._trem_roll + float(roll or 0.0))
+        R = (_rot_z(self.yaw) @ _rot_y(-self.s * _roll_eff)
+             @ _rot_x(self._pitch))
         self._set(self.arm, R, self.root)
         self._set(self.web, R, self.root + R @ self._web_local)
         self._set_arm_shadow(R, self.root)
@@ -1687,10 +1884,6 @@ class HandRig:
             if t is None:
                 continue
             x, y, z, a = t
-            # R5.6: apply tendon lift to idle/raised fingers (visual only)
-            tendon_lift = self._tendon_lift.get(f, 0.0)
-            if tendon_lift > 0.0:
-                z += tendon_lift
             g = self._geom[f]
             base = self.root + R @ g["base_local"]
             pole = R @ g["pole_local"]
@@ -1732,8 +1925,19 @@ class HandRig:
         """Snap the hand onto its targets (used at startup/after a jump)."""
         for _ in range(max(1, int(steps))):
             self.update(0.1, finger_x, press, advance_black)
+            # a snap is not travel: the anticipation yaw is a transient for
+            # real motion (turn-while-traveling) and must not swing the
+            # fast-forwarded steps onto a different endpoint
+            self._yaw_splay = 0.0
         self._vx = 0.0
         self.yaw = 0.0
+        # motion step 1 states are travel-driven: zero them so the closing
+        # update (and every reach/diag cell) is exactly the static pose
+        self._yaw_splay = 0.0
+        self._trem_roll = 0.0
+        self._run_w = 0.0
+        self._run_hist = []
+        self._tip_z = {}
         self.update(1e-4, finger_x, press, advance_black)
         return self
 
@@ -1743,6 +1947,17 @@ class HandRig:
         self._vx = 0.0
         self._targets_x = {}
         self._sx = {}
+        # motion step 1 states back to zero (the closing update() then
+        # behaves exactly like a fresh rig)
+        self._yaw_splay = 0.0
+        self._run_w = 0.0
+        self._run_hist = []
+        self._trem_hist = []
+        self._trem_roll = 0.0
+        self._tip_z = {}
+        for f in FINGERS:
+            self._free_since[f] = -1e9
+            self._tendon_pull[f] = 0.0
         for f in FINGERS:
             self._col.pop(f, None)
         self.update(1.0, self._neutral_x(), {})

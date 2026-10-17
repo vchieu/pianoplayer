@@ -52,8 +52,8 @@ build manifest.
 | `pianoplayer/scorereader.py` | `reader()` -> music21 Stream to `INote` list (ties absorbed into the first note, simultaneous voices kept, `time_real`/`dur_real` carry the true onsets for playback; a chord reduced to one sounding pitch is not `isChord`; only numeric 1..5 lyrics become finger hints; single-note parts allowed); `PIG2Stream()` for PIG `.txt` (duplicate-chord behaviour unchanged; CLI/GUI import path only) |
 | `pianoplayer/pigloader.py` | PIG dataset loading via `load_pig()` (chords included, note-weighted-average evaluation) |
 | `pianoplayer/hand.py` | **Core algorithm** -- `Hand` finds the fingering |
-| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`) |
-| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`); `hand3d` and `handmesh` both import from here |
+| `pianoplayer/hand3d.py` | Procedural anatomical hand, analytic IK (`HandRig`), hand motion step 1 (anticipation / wrist fit / tendon fan) |
+| `pianoplayer/handspec.py` | Single source of truth for hand geometry (finger/base/lens/radii, arm profile, rest pose, SDF constants, `geom_hash()`) and the motion knobs (not hashed); `hand3d` and `handmesh` both import from here |
 | `pianoplayer/handmesh.py` | Unified skinned hand mesh (Tier B): SDF rest mesh, LBS weights, procedural skin texture |
 | `pianoplayer/audio.py` | Real-time additive piano synth (`SoundEngine`, `SynthCore`) |
 | `pianoplayer/vkeyboard.py` | 3D scene, frame loop, A/V sync, HUD (`VirtualKeyboard`) |
@@ -311,6 +311,55 @@ onto `z'=1.6` (world-projection, hidden in the perspective view). Skin material 
 0.1 cm` makes the root chase with fast `TAU = 0.03` for that frame, and a
 stretched hold (`tip_err > 0.3`) additionally drags the root target toward
 its own key (proportional pull, ≤0.4) so legato stretches stay attached.
+
+**Hand motion, step 1** (ported from `pygame-piano-animator/hands.py` +
+`pianist.py` BEHAVIORS; idea-port, not line-port -- every knob lives in the
+"motion step 1" block of `handspec.py`, all visual-only, and all deliberately
+**excluded from `geom_hash()`** so retuning motion never rebuilds the mesh
+cache; 2D inches/model units became cm × `hf/0.82` like `_REST_REF_HF`):
+
+- *anticipation* (1a): `_pump` stamps `p.strike_in` = seconds until each
+  aiming finger's next unfired strike (`t_on - now`, past-due notes read 0.0)
+  and passes it as `rig.update(..., strike_in=...)` -- a new **optional**
+  param, so old `update(dt, finger_x, press, ...)` callers, `settle()`,
+  `reset()` and every test behave exactly as before. An aiming finger whose
+  lead is `>= STRIKE_T` (0.12 s) waits at its raised PREP height
+  (`HOVER + PREP_ADD[f]*rs`, hands PREP-HOVER) and makes the final drop to the
+  key inside `STRIKE_T` with a quadratic (`s*s`) ease, so the tip is exactly
+  on the key at `t_on`; without `strike_in` the old binary hover still
+  applies. A *rising* target eases up over `RISE_TAU` (0.045 s ~ the hands
+  `RELEASE_T` 0.12 s lift), a *descending* one (the strike drop, the key going
+  down) is taken exactly, so contact timing and `tip_err` never lag. A
+  released finger lingers over its key for `LINGER_T` (0.06 s) and only then
+  drifts back toward its rest slot over `RETURN_T` (0.35 s) -- the
+  `_free_since` stamp gates the idle lerp, and never-pressed fingers get the
+  full legacy lerp (`s_ret = 1`).
+- *turn before slide* (1b): the anticipation yaw leans toward where the root
+  still has to travel (`YAW_SPLAY_GAIN` 0.05 rad per cm, clamped to
+  `WRIST_DEV_DEG` (-26°, +8°)) and is smoothed with `YAW_SPLAY_TAU` 0.04 s,
+  faster than the root `TAU` 0.065 s, so the turn visibly leads the slide
+  (a 12 cm shift reads ~3.5°, the wrist limit is reached past ~9 cm of
+  travel). It is exactly 0 once the hand has arrived and `settle()` zeroes
+  it, so reach cells and the static poses are bit-identical. The shoulder-arm
+  yaw keeps the hands `YAW_PRIOR` role (preferring the forearm's line);
+  `SPLAY_LIMIT_DEG` / `SPLAY_COMFORT_DEG` / `REACH_MIN` / `REACH_COMFORT` /
+  `CROSS_TURN_DEG` are recorded in `handspec.py` as the splay/reach envelope
+  this maps onto (the 3D rig has no per-finger splay clamp of its own).
+- *tendon link, idle fan, gestures* (1c): a curving leader drags its
+  `TENDON_FOLLOWERS` (3↔4 both ways, 5 follows both) `TENDON_LINK` 0.6 of the
+  way down with it, never below `TENDON_FLOOR` (0.38 cm above the key tops),
+  idle fingers only -- a follower reaching for a key of its own ignores it --
+  smoothed with `TENDON_TAU` 0.04 s (this replaces the old R5.6
+  `TENDON_LIFT_*` lift constants, which the source has no counterpart for).
+  Idle fingers fan between their busy neighbours (hands `SHAPE_FALLOFF` 0.6
+  per finger of distance, capped at `SHAPE_CAP_X` 2.1 cm × rs, ramped in over
+  `SHAPE_RAMP`; a busy finger inside a comfortable grip pulls nothing and the
+  thumb's pull fades out as it passes the index slot), so the hand's shape
+  follows the notes. Inside a monotone scale run the root spring eases from
+  `TAU` to `RUN_GLIDE_TAU` 0.12 s over `RUN_RAMP_T` 0.15 s (wrist glides,
+  fingers cross); alternations faster than `TREM_GAP_T` 0.3 s rock the forearm
+  `TREM_ROLL_MAX` 0.07 rad after `TREM_MIN_NOTES` 4 onsets, striking side down,
+  and a caller may add its own `roll=` on `update()`.
 
 Key dip: keys hinge around `KEY_PIVOT_Y`, drop = `(KEY_PIVOT_Y - y) * sin(angle)`.
 

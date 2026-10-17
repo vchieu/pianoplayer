@@ -148,6 +148,21 @@ Pressing **3D Player** (GUI) or adding `-v` (CLI) opens the animated scene:
   pressing neighbours, ride higher over black-key areas, and the wrist
   bounces on quick re-strikes plus a small loudness lift (all visual-only,
   IK fingertip targets stay exact);
+- **hand motion, step 1** (ported from the 2D pygame-piano-animator pose
+  solver; idea-port, all visual-only):
+  - *anticipation*: the player knows how long until each finger's next strike,
+    so a finger about to play lifts to a raised "ready" height early, hovers
+    there and then drops onto its key in the last 0.12 s with an accelerating
+    ease -- the tip is exactly on the key at the moment it sounds;
+  - *linger and return*: a released finger stays over its key for a moment
+    before drifting back to its resting slot, instead of snapping away;
+  - *turn before slide*: a hand that has to travel a long way turns at the
+    wrist first (within the wrist's own range) and slides second;
+  - *linked tendons + idle fan*: a finger curving down to a black key takes
+    its neighbours partly with it, and the idle fingers fan out between the
+    busy ones, so the hand's shape keeps following the notes;
+  - *gestures*: the wrist glides through scale runs, rocks the forearm in fast
+    repeated-note (tremolo) figures, and bounces on repeated chords;
 - **keys dip** on their hinge when a finger presses them, and flash with an
   orange (right hand) or violet (left hand) accent; repeated same-pitch
   notes get a visual release `v_off` earlier than the audio `t_off`, so the
@@ -241,6 +256,11 @@ You can change it with `-rbeam` and `-lbeam` command line options.
 - Depth of combinatorial search, from 3 up to 9 notes ahead of the currently playing note. By
 default the algorithm selects this number automatically based on the duration of the notes to be played.
 This option only applies to the legacy sliding-window search mode; the default solver looks at the whole passage at once.
+- The look and the motion of the animated hands (anticipation height, strike
+  and linger timings, wrist turn, tendon link, idle fan, scale-run glide,
+  tremolo rock) live in the "motion step 1" block of `pianoplayer/handspec.py`
+  and can be retuned there; they never affect the fingering, and they are
+  excluded from the mesh cache hash, so tuning them does not rebuild anything.
 
 ## Limitations
 - Awkward crossings (e.g. the 3rd finger over the 4th) are allowed but pay a
